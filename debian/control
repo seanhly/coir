@@ -1,0 +1,16 @@
+Package: coir
+Version: 0.0.1
+Architecture: all
+Maintainer: Seán Healy <sean@seanhealy.ie>
+Installed-Size: 66
+Depends: 
+Section: database
+Priority: optional
+Description: An individually fair re-ranker for search results.
+ This package provides a C++ implementation of greedy, individual fairness, as
+ proposed by Biega, Gummadi and Weikum (2018).
+
+ The program runs as a daemon, listening for requests on a named pipe and
+ writing responses to a separate directory of named pipes.  A reference client
+ (coir-client) is included with this package; this client probes the daemon
+ using the expected protocol.
