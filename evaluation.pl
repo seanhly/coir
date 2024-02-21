@@ -3,7 +3,13 @@
 % This is necessary for SWI-Prolog scripts run as standalone programs.
 :- initialization(main, main).
 
+get_threshold_from_arg([Arg|_], T) :-
+	!, atom_number(Arg, T).
+get_threshold_from_arg([], 0.99).
+
 main :-
+	current_prolog_flag(argv, Argv),
+	get_threshold_from_arg(Argv, T),
     read_string(user_input, "", "", _, Input),
     string_chars(Input, Chars),
     candidate_file(X, Chars, []),
@@ -14,7 +20,7 @@ main :-
 	\+find_best(
 		better_solution,
 		quality_re_ranking,
-		[X, _, 1] % 1] %0.90]
+		[X, _, T]
 	),
 	solution_count(C),
 	write(C), nl,
@@ -49,7 +55,7 @@ find_best(IsBetter, Functor, Template) :-
 	OtherPred =.. [Functor|Args],
 	FirstPred,
 	assertz(best_solution(FirstArgs)),
-	assertz(solution_count(1)),
+	assertz(solution_count(0)),
 	retractall(seen_candidate(_, possible_solution)),
 	!,
 	%guitracer, trace, 
@@ -92,7 +98,7 @@ quality_re_ranking(
 	ReRanking,
 	QualityThreshold
 ) :-
-    AttSum is 0,
+    AttSum = 0,
     rel_sum(Candidates, RelSum),
     print([rel,RelSum]), nl,
     best_ranking_dcg(1, Candidates, 0, IDCG),

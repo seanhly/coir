@@ -7,13 +7,15 @@ typedef enum {
 	RERANK,
 	DAEMON,
 	SHOW_CANDIDATES,
+	EXPERIMENT,
 	BAD_SUBCOMMAND
 } Subcommand;
 
 typedef enum {
 	UPDATE_RELEVANCE,
 	GEN_RANKING,
-	GET_CANDIDATES
+	GET_CANDIDATES,
+	LAUNCH_EXPERIMENT,
 } Job;
 
 typedef enum {
@@ -44,7 +46,8 @@ typedef struct {
 	RankContext **rank_contexts_per_rank;
 	Candidate *candidates_ptr;
 	ui64 candidates_c;
-	f64 min_dcg;
+	f64 idcg;
+	f64 quality_threshold;
 } Context;
 
 typedef struct {
