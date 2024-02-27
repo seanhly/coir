@@ -1,96 +1,115 @@
 #include <math.h>
-#include <openssl/err.h>
-#include <openssl/evp.h>
-#include <pthread.h>
-#include <stdarg.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <time.h>
 #include <algorithm>
 #include <unistd.h>
-#include <unordered_map>
 #include <unordered_set>
 
-#include "strings.h"
 #include "types.h"
+
+std::unordered_map<docid, gid> DOC_GROUPS;
+qid CURRENT_QUERY;
+
+#include "strings.h"
 #include "config.c"
 #include "constants.h"
 #include "attention.cpp"
+#include "errors.c"
+#include "fp.c"
+#include "io.c"
 #include "utils.c"
 #include "metrics.cpp"
 #include "help.c"
+#include "gc.c"
 #include "debug.c"
 
 std::unordered_map<ui64, Context> CANDIDATES;
 
-void free_rank_contexts(Context ctx) {
-	for (int i = 0; i < ctx.rank_contexts_c; i++) {
-		free(ctx.rank_contexts[i].candidates_ptr);
+void set_job_path(PathBuffer path_buffer) {
+	for (int i = 0; i < 16; i++) {
+		char c = (char) ((CURRENT_JOB >> (i * 4)) & 0xF);
+		path_buffer.buffer[path_buffer.length + i] =
+			c < 10 ? c + '0' : c - 10 + 'a';
 	}
-	free(ctx.rank_contexts);
-	free(ctx.rank_contexts_per_rank);
 }
 
-void free_context(Context ctx) {
-	free_rank_contexts(ctx);
-	free(ctx.candidates_ptr);
+void set_start_job_path() {
+	set_job_path(job_start_path_buffer());
 }
 
-void build_rank_candidate_lists(
-	Context *ctx, f64 quality_threshold
-) {
-	ctx->rank_contexts =
-		(RankContext*) malloc(PAGE_LENGTH * sizeof(RankContext));
-	ctx->rank_contexts_per_rank =
-		(RankContext**) malloc(PAGE_LENGTH * sizeof(RankContext*));
+void set_end_job_path() {
+	set_job_path(job_end_fifo_buffer());
+}
+
+void set_query(qid query) {
+	CURRENT_QUERY = query;
+}
+
+void new_job() {
+	if (JOB_FILE != NULL) {
+		fclose(JOB_FILE);
+		JOB_FILE = NULL;
+	}
+	if (JOB_END_FILE != NULL)
+		JOB_END_FILE = NULL;
+	CURRENT_JOB = t();
+	set_start_job_path();
+	set_end_job_path();
+}
+
+
+void build_rank_candidate_lists(Context &ctx, f64 quality_threshold) {
+	ctx.quality_threshold = quality_threshold;
+	ctx.rank_contexts =
+		(CandidateList*) malloc(PAGE_LENGTH * sizeof(CandidateList));
+	ctx.rank_contexts_per_rank =
+		(CandidateList**) malloc(PAGE_LENGTH * sizeof(CandidateList*));
 	ui64 offset = 0;
 	ui64 previous_offset = 0;
 	long last_candidate_list_length = -1;
 	ui64 rank_contexts_c = 0;
-	for (int j = 1; j <= PAGE_LENGTH; j++) {
+	for (ui64 rnk = 1; rnk <= PAGE_LENGTH; rnk++) {
 		f64 min_rel_priori =
-			min_rel_priori_dcg(ctx->candidates_ptr, j, quality_threshold);
+			min_rel_priori_dcg(ctx.candidates_ptr, rnk, quality_threshold);
 		ui64 i;
-		for (i = offset; i < ctx->candidates_c; i++)
-			if (ctx->candidates_ptr[i].relevance < min_rel_priori) break;
+		for (i = offset; i < ctx.candidates_c; i++)
+			if (ctx.candidates_ptr[i].relevance < min_rel_priori) break;
 		ui64 next_candidate_list_length = i - offset;
 		if (
 			last_candidate_list_length != -1
 			&& next_candidate_list_length == last_candidate_list_length
 			&& offset == previous_offset
-		) {
-			ctx->rank_contexts_per_rank[j - 1] =
-				ctx->rank_contexts_per_rank[j - 2];
-		} else {
-			ctx->rank_contexts[rank_contexts_c].candidates_c =
+		)
+			ctx.rank_contexts_per_rank[rnk - 1] =
+				ctx.rank_contexts_per_rank[rnk - 2];
+		else {
+			ctx.rank_contexts[rank_contexts_c].candidates_c =
 				next_candidate_list_length;
 			ui64 size = next_candidate_list_length;
 			Candidate **candidates_ptr =
 				(Candidate**) malloc(size * sizeof(Candidate*));
-			ctx->rank_contexts[rank_contexts_c].candidates_ptr = candidates_ptr;
-			for (ui64 i = 0; i < next_candidate_list_length; ++i) {
-				ctx->rank_contexts[rank_contexts_c].candidates_ptr[i] =
-					&ctx->candidates_ptr[i + offset];
-			}
+			ctx.rank_contexts[rank_contexts_c].candidates_ptr =
+				candidates_ptr;
+			for (ui64 i = 0; i < next_candidate_list_length; ++i)
+				ctx.rank_contexts[rank_contexts_c].candidates_ptr[i] =
+					&ctx.candidates_ptr[i + offset];
 			std::sort(
-				ctx->rank_contexts[rank_contexts_c].candidates_ptr,
-				ctx->rank_contexts[rank_contexts_c].candidates_ptr +
+				ctx.rank_contexts[rank_contexts_c].candidates_ptr,
+				ctx.rank_contexts[rank_contexts_c].candidates_ptr +
 					next_candidate_list_length,
 				compare_candidate_ptr
 			);
 			rank_contexts_c++;
-			ctx->rank_contexts_per_rank[j - 1] =
-				&ctx->rank_contexts[rank_contexts_c - 1];
+			ctx.rank_contexts_per_rank[rnk - 1] =
+				&ctx.rank_contexts[rank_contexts_c - 1];
 		}
 		last_candidate_list_length = next_candidate_list_length;
 		previous_offset = offset;
 		if (i == offset + 1) offset = i;
 	}
-	ctx->rank_contexts_c = rank_contexts_c;
+	ctx.rank_contexts_c = rank_contexts_c;
 }
 
 Context context_from_sorted_candidates(
@@ -101,6 +120,40 @@ Context context_from_sorted_candidates(
 	Context ctx;
 	ctx.candidates_c = len;
 	ctx.candidates_ptr = (Candidate*) malloc(len * sizeof(Candidate));
+	ctx.group_contexts = (GroupContext*) malloc(256 * sizeof(GroupContext));
+	ctx.groups_c = 0;
+	ctx.majority_group = &ctx.group_contexts[0];
+	for (ui16 i = 0; i < 256; i++) {
+		ctx.group_contexts[i].candidates.candidates_c = 0;
+		ctx.group_contexts[i].exposure = 0;
+		ctx.group_contexts[i].bulk_relevance = 0;
+		ctx.group_contexts[i].offset = 0;
+	}
+	for (ui64 i = 0; i < len; i++) {
+		ctx.candidates_ptr[i] = candidates_ptr[i];
+		gid group = DOC_GROUPS[candidates_ptr[i].doc];
+		if (group >= ctx.groups_c) ctx.groups_c = group + 1;
+		ctx.group_contexts[group].candidates.candidates_c++;
+		ctx.group_contexts[group].bulk_relevance
+			+= candidates_ptr[i].relevance;
+	}
+	for (ui16 i = 0; i < 256; i++) {
+		if (ctx.group_contexts[i].candidates.candidates_c > 0) {
+			ctx.group_contexts[i].candidates.candidates_ptr =
+				(Candidate**) malloc(
+					ctx.group_contexts[i].candidates.candidates_c
+					* sizeof(Candidate*)
+				);
+			ctx.group_contexts[i].candidates.candidates_c = 0;
+		}
+	}
+	for (ui64 i = 0; i < len; i++) {
+		gid group = DOC_GROUPS[candidates_ptr[i].doc];
+		GroupContext group_context = ctx.group_contexts[group];
+		ctx.group_contexts[group].candidates.candidates_ptr[
+			ctx.group_contexts[group].candidates.candidates_c++
+		] = &ctx.candidates_ptr[i];
+	}
 	memcpy(
 		ctx.candidates_ptr, candidates_ptr, len * sizeof(Candidate)
 	);
@@ -110,50 +163,39 @@ Context context_from_sorted_candidates(
 		idcg += discounted_gain(candidates_ptr[i].relevance, i + 1);
 	ctx.idcg = idcg;
 	ctx.quality_threshold = quality_threshold;
-	build_rank_candidate_lists(&ctx, quality_threshold);
+	build_rank_candidate_lists(ctx, quality_threshold);
 	return ctx;
 }
 
-void update_relevance(FILE *job_fp, FILE *job_end_fp) {
-	ui64 query_id;
-	if (fread(&query_id, sizeof(ui64), 1, job_fp) != 1)
-		err_exit("error reading query_id\n");
-	f64 quality_threshold;
-	if (fread(&quality_threshold, sizeof(f64), 1, job_fp) != 1)
-		err_exit("error reading quality_threshold\n");
-	ui64 doc_id;
-	f64 relevance;
+void update_relevance() {
+	set_query(qid_from_client());
+	f64 quality_threshold = quality_threshold_from_client();
 	Candidate *doc_relevance_update = doc_relevance_update_buffer();
 	ui64 row = 0;
-	auto it = CANDIDATES.find(query_id);
-	bool splicing = it != CANDIDATES.end();
+	auto it = CANDIDATES.find(CURRENT_QUERY);
 	std::unordered_map<ui64, ui64> doc_id_to_exposure;
 	Context prev_ctx;
+	bool splicing = it != CANDIDATES.end();
 	if (splicing) {
 		prev_ctx = it->second;
-		for (int i = 0; i < prev_ctx.candidates_c; i++) {
-			doc_id_to_exposure[prev_ctx.candidates_ptr[i].doc_id] =
-				prev_ctx.candidates_ptr[i].exposure;
-		}
+		for (int i = 0; i < prev_ctx.candidates_c; i++)
+			doc_id_to_exposure[prev_ctx.candidates_ptr[i].doc] =
+					prev_ctx.candidates_ptr[i].exposure;
 		free_context(prev_ctx);
 	}
-	while (fread(&doc_id, sizeof(ui64), 1, job_fp) == 1) {
-		if (fread(&relevance, sizeof(f64), 1, job_fp) == 1) {
-			doc_relevance_update[row].doc_id = doc_id;
-			doc_relevance_update[row].relevance = relevance;
-			if (splicing) {
-				auto it = doc_id_to_exposure.find(doc_id);
-				if (it != doc_id_to_exposure.end()) {
-					doc_relevance_update[row].exposure = it->second;
-				}
-				else doc_relevance_update[row].exposure = 0;
-			} else
-				doc_relevance_update[row].exposure = 0;
-			doc_relevance_update[row].masked = false;
-			row++;
-		} else {
-			err_exit("error reading relevance (Y)\n");
-		}
+	docid doc;
+	while (doc_from_client(doc)) {
+		doc_relevance_update[row].doc = doc;
+		doc_relevance_update[row].relevance = relevance_from_client();
+		if (splicing) {
+			auto it = doc_id_to_exposure.find(doc);
+			if (it != doc_id_to_exposure.end())
+				doc_relevance_update[row].exposure = it->second;
+			else doc_relevance_update[row].exposure = 0;
+		} else doc_relevance_update[row].exposure = 0;
+		doc_relevance_update[row].masked = false;
+		row++;
+		DOC_GROUPS[doc] = group_from_client();
 	}
 	doc_id_to_exposure.clear();
 	std::sort(
@@ -161,22 +203,18 @@ void update_relevance(FILE *job_fp, FILE *job_end_fp) {
 		doc_relevance_update + row,
 		compare_candidate_by_relevance
 	);
-	char *the_qrel_file = qrel_file(query_id);
-	FILE *qrel_fp = safe_file_write(the_qrel_file);
-	safe_write_item(&row, sizeof(ui64), qrel_fp);
-	for (int i = 0; i < row; i++) {
-		safe_write_item(
-			&doc_relevance_update[i].doc_id, sizeof(ui64), qrel_fp);
-		safe_write_item(
-			&doc_relevance_update[i].relevance, sizeof(f64), qrel_fp);
-		safe_write_item(
-			&doc_relevance_update[i].exposure, sizeof(ui64), qrel_fp);
-	}
-	fclose(qrel_fp);
+	len_to_qrel(row);
+	for (int i = 0; i < row; i++)
+		candidate_to_qrel(doc_relevance_update[i]);
+	close_qrel_file();
 	Context ctx = context_from_sorted_candidates(
 		doc_relevance_update, row, quality_threshold
 	);
-	CANDIDATES[query_id] = ctx;
+	if (splicing)
+		for (ui16 i = 0; i < 256; i++)
+			ctx.group_contexts[i].exposure =
+				prev_ctx.group_contexts[i].exposure;
+	CANDIDATES[CURRENT_QUERY] = ctx;
 }
 
 f64 min_rank_rel(f64 min_dcg, ui64 rnk, f64 other_dcg_weight) {
@@ -184,13 +222,12 @@ f64 min_rank_rel(f64 min_dcg, ui64 rnk, f64 other_dcg_weight) {
 	return log2(1 + log2(rnk + 1) * (min_dcg - other_dcg_weight));
 }
 
-f64 unfairness(Context ctx) {
+f64 individual_unfairness(Context ctx) {
 	f64 total_relevance = 0;
 	f64 total_exposure = 0;
 	for (ui64 i = 0; i < ctx.candidates_c; i++) {
 		total_relevance += ctx.candidates_ptr[i].relevance;
 		total_exposure += ctx.candidates_ptr[i].exposure;
-		Candidate candidate = ctx.candidates_ptr[i];
 	}
 	f64 unfairness = 0;
 	for (ui64 i = 0; i < ctx.candidates_c; i++) {
@@ -205,69 +242,220 @@ f64 unfairness(Context ctx) {
 	return unfairness;
 }
 
-void gen_ranking(FILE *job_fp, FILE *job_end_fp) {
-	ui64 query_id;
-	if (fread(&query_id, sizeof(ui64), 1, job_fp) != 1)
-		err_exit("error reading query_id\n");
-	f64 quality_threshold;
-	if (fread(&quality_threshold, sizeof(f64), 1, job_fp) != 1)
-		err_exit("error reading quality_threshold\n");
-	auto it = CANDIDATES.find(query_id);
+f64 group_unfairness(Context ctx) {
+	f64 total_relevance = 0;
+	f64 total_exposure = 0;
+	for (gid g = 0; g < ctx.groups_c; ++g) {
+		total_relevance += ctx.group_contexts[g].bulk_relevance;
+		total_exposure += ctx.group_contexts[g].exposure;
+	}
+	f64 mean_relative_compensation = total_exposure / total_relevance;
+	f64 total_unfairness = 0;
+	ui8 underexposed_groups = 0;
+	for (gid g = 0; g < ctx.groups_c; ++g) {
+		if (ctx.group_contexts[g].candidates.candidates_c == 0) continue;
+		f64 relevance = ctx.group_contexts[g].bulk_relevance;
+		f64 exposure = ctx.group_contexts[g].exposure;
+		f64 relative_compensation = exposure / relevance;
+		if (mean_relative_compensation > relative_compensation) {
+			f64 diff = mean_relative_compensation - relative_compensation;
+			f64 error = 1 - relative_compensation / mean_relative_compensation;
+			total_unfairness += error;
+			++underexposed_groups;
+		}
+	}
+	return total_unfairness / underexposed_groups;
+}
+
+Context get_context(f64 quality_threshold) {
+	auto it = CANDIDATES.find(CURRENT_QUERY);
 	Context ctx;
 	if (it == CANDIDATES.end()) {
-		char *the_qrel_file = qrel_file(query_id);
-		FILE *qrel_fp = safe_file_read(the_qrel_file);
-		ui64 len;
-		safe_read_item(&len, sizeof(ui64), qrel_fp);
+		ui64 len = len_from_qrel();
 		Candidate *candidates_ptr =
-			(Candidate*) malloc(len * sizeof(Candidate));
+	   		 (Candidate*) malloc(len * sizeof(Candidate));
 		for (ui64 i = 0; i < len; i++) {
-			ui64 doc_id;
-			f64 relevance;
-			ui64 exposure;
-			safe_read_item(&doc_id, sizeof(ui64), qrel_fp);
-			safe_read_item(&relevance, sizeof(f64), qrel_fp);
-			safe_read_item(&exposure, sizeof(ui64), qrel_fp);
-			candidates_ptr[i].doc_id = doc_id;
-			candidates_ptr[i].relevance = relevance;
-			candidates_ptr[i].exposure = exposure;
+			candidates_ptr[i].doc = doc_from_qrel();
+			candidates_ptr[i].relevance = relevance_from_qrel();
+			candidates_ptr[i].exposure = exposure_from_qrel();
 			candidates_ptr[i].masked = false;
+			DOC_GROUPS[candidates_ptr[i].doc] = group_from_qrel();
 		}
-		fclose(qrel_fp);
+		close_qrel_file();
 		ctx = context_from_sorted_candidates(
-			candidates_ptr, len, quality_threshold
+	   		 candidates_ptr, len, quality_threshold
 		);
-		CANDIDATES[query_id] = ctx;
+		CANDIDATES[CURRENT_QUERY] = ctx;
 	} else {
 		ctx = it->second;
 		if (ctx.quality_threshold != quality_threshold) {
 			free_rank_contexts(ctx);
-			build_rank_candidate_lists(&ctx, quality_threshold);
+			build_rank_candidate_lists(ctx, quality_threshold);
 		}
-		CANDIDATES[query_id] = ctx;
+		CANDIDATES[CURRENT_QUERY] = ctx;
 	}
+	return ctx;
+}
+
+void get_candidates() {
+	set_query(qid_from_client());
+	f64 quality_threshold = quality_threshold_from_client();
+	Context ctx = get_context(quality_threshold);
 	const ui64 local_page_length = MIN(ctx.candidates_c, PAGE_LENGTH);
 	if (local_page_length == 0) return;
+	ui64 rnk = 1;
+	CandidateList last_rank_context =
+		ctx.rank_contexts[ctx.rank_contexts_c - 1];
+	ui64_to_client(last_rank_context.candidates_c);
+	for (ui64 i = 0; i < last_rank_context.candidates_c; ++i) {
+		Candidate *candidate = last_rank_context.candidates_ptr[i];
+		doc_to_client(candidate->doc);
+		relevance_to_client(candidate->relevance);
+	}
+	do {
+		CandidateList *rc = ctx.rank_contexts_per_rank[rnk - 1];
+		ui64_to_client(rc->candidates_c);
+		for (ui64 j = 1; j <= rc->candidates_c; j++)
+			doc_to_client(rc->candidates_ptr[j - 1]->doc);
+		rnk++;
+	} while (rnk <= local_page_length);
+}
+
+void update_exposure(
+	Context ctx, RankedItem* ranking, ui64 local_page_length
+) {
+	std::sort(ranking, ranking + local_page_length, compare_ranked_items);
+	ui8 *attention = attention_buffer();
+	geometric_attention(attention, 0.40);
+	f64 majority_relative_compensation =
+		ctx.majority_group->exposure / ctx.majority_group->bulk_relevance;
+	gid majority_group = ctx.majority_group - ctx.group_contexts;
+	for (ui64 i = 0; i < local_page_length; ++i) {
+		RankedItem ranked_item = ranking[i];
+		Candidate *update_me = ranked_item.candidate;
+		ui64 rnk = ranked_item.rank;
+		ui8 item_attention = attention[rnk - 1];
+		gid g = DOC_GROUPS[update_me->doc];
+		ctx.group_contexts[g].exposure += item_attention;
+		if (g == majority_group)
+			majority_relative_compensation =
+				ctx.majority_group->exposure
+				/ ctx.majority_group->bulk_relevance;
+		else {
+			f64 relative_compensation =
+				ctx.group_contexts[g].exposure
+				/ ctx.group_contexts[g].bulk_relevance;
+			if (relative_compensation > majority_relative_compensation) {
+				ctx.majority_group = &ctx.group_contexts[g];
+				majority_relative_compensation = relative_compensation;
+			}
+		}
+		ui64 next_state_exposure = update_me->exposure + item_attention;
+		Candidate next_state = *update_me;
+		next_state.exposure = next_state_exposure;
+		for (ui64 i = 0; i < ctx.rank_contexts_c; ++i) {
+			const CandidateList rc = ctx.rank_contexts[i];
+			Candidate last_item = ctx.candidates_ptr[rc.candidates_c - 1];
+			if (update_me->relevance >= last_item.relevance) {
+				Candidate **update_me_ptr = std::lower_bound(
+					rc.candidates_ptr,
+					rc.candidates_ptr + rc.candidates_c,
+					update_me,
+					compare_candidate_ptr
+				);
+				Candidate **move_here = std::lower_bound(
+					rc.candidates_ptr,
+					rc.candidates_ptr + rc.candidates_c,
+					&next_state,
+					compare_candidate_ptr
+				) - 1;
+				if (move_here > update_me_ptr) {
+					ui64 distance = move_here - update_me_ptr;
+					memmove(
+						update_me_ptr,
+						update_me_ptr + 1,
+						distance * sizeof(Candidate*)
+					);
+					*move_here = update_me;
+				}
+			}
+		}
+		update_me->exposure = next_state_exposure;
+	}
+	for (ui16 g = 0; g < ctx.groups_c; g++) {
+		if (ctx.group_contexts[g].candidates.candidates_c == 0) continue;
+		f64 relative_compensation =
+			ctx.group_contexts[g].exposure
+			/ ctx.group_contexts[g].bulk_relevance;
+		f64 error =
+			(majority_relative_compensation - relative_compensation) / 255;
+		ctx.group_contexts[g].error = error;
+	}
+}
+
+
+void gen_fairco_re_ranking_inner(
+	Context ctx,
+	const ui64 local_page_length,
+	RankingMode mode
+) {
+	RankedItem *ranking = ranking_buffer();
+	ui64 rnk = 1;
+	for (ui64 rnk = 1; rnk <= local_page_length; ++rnk) {
+		Candidate *best = NULL;
+		f64 best_score = 0;
+		gid best_group = 0;
+		for (ui16 g = 0; g < ctx.groups_c; g++) {
+			GroupContext group_context = ctx.group_contexts[g];
+			if (group_context.candidates.candidates_c == 0) continue;
+			Candidate *candidate = group_context.candidates.candidates_ptr[
+				group_context.offset];
+			f64 score = candidate->relevance
+				+ FAIRCO_LAMBDA * group_context.error;
+			if (score > best_score) {
+				best_score = candidate->relevance;
+				best_group = g;
+				best = candidate;
+			}
+		}
+		ctx.group_contexts[best_group].offset++;
+		ranking[rnk - 1] = {rnk, best};
+		if (mode == STANDALONE) doc_to_client(best->doc);
+	}
+	for (ui16 g = 0; g < ctx.groups_c; g++)
+		ctx.group_contexts[g].offset = 0;
+	update_exposure(ctx, ranking, local_page_length);
+	if (mode == PART_OF_EXPERIMENT) {
+		unfairness_to_client(group_unfairness(ctx));
+		unfairness_to_client(individual_unfairness(ctx));
+	}
+}
+
+void gen_iaf_re_ranking_inner(
+	f64 quality_threshold,
+	Context ctx,
+	const ui64 local_page_length,
+	RankingMode mode
+) {
 	f64 before_weight = 0;
 	f64 min_rel = 0;
 	ui64 rnk = 1;
-	Candidate **ranking = ranking_buffer();
-	// print all candidates IDs
+	RankedItem *ranking = ranking_buffer();
 	do {
-		const RankContext *rc = ctx.rank_contexts_per_rank[rnk - 1];
-		//print_rank_candidate_lists(ctx);
+		const CandidateList *rc = ctx.rank_contexts_per_rank[rnk - 1];
 		Candidate **candidates_ptr = rc->candidates_ptr;
 		Candidate *candidate;
 		for (ui64 j = 1; j <= rc->candidates_c; j++) {
 			candidate = candidates_ptr[j - 1];
-			if (candidate->relevance >= min_rel && !candidate->masked) {
+			if (candidate->relevance >= min_rel && !candidate->masked)
 				break;
-			}
 		}
-		safe_write_item(&candidate->doc_id, sizeof(ui64), job_end_fp);
+		if (mode == STANDALONE)
+			doc_to_client(candidate->doc);
+		get_orig_doc_id(candidate->doc);
 		candidate->masked = true;
 		before_weight += discounted_gain(candidate->relevance, rnk);
-		ranking[rnk - 1] = candidate;
+		ranking[rnk - 1] = {rnk, candidate};
 		rnk++;
 		if (rnk <= local_page_length) {
 			f64 last_weight = 9e99;
@@ -297,7 +485,6 @@ void gen_ranking(FILE *job_fp, FILE *job_end_fp) {
 				) - 1;
 				do {
 					while (n_candidate->masked) --n_candidate;
-					// Print relevance
 					f64 optimistic_dcg_suf = 0;
 					top_candidate = ctx.candidates_ptr;
 					n_candidate->masked = true;
@@ -319,270 +506,62 @@ void gen_ranking(FILE *job_fp, FILE *job_end_fp) {
 			}
 		}
 	} while (rnk <= local_page_length);
-	ui8 *attention = attention_buffer();
-	geometric_attention(attention, 0.40);
-	for (ui64 i = 0; i < local_page_length; i++) ranking[i]->masked = false;
-	std::sort( ranking, ranking + local_page_length, compare_candidate_ptr);
-	for (ui64 rnk = local_page_length; rnk >= 1; --rnk) {
-		Candidate *update_me = ranking[rnk - 1];
-		ui64 next_state_exposure = update_me->exposure + attention[rnk - 1];
-		Candidate next_state = *update_me;
-		next_state.exposure = next_state_exposure;
-		for (ui64 i = 0; i < ctx.rank_contexts_c; ++i) {
-			const RankContext rc = ctx.rank_contexts[i];
-			Candidate last_item = ctx.candidates_ptr[rc.candidates_c - 1];
-			if (update_me->relevance >= last_item.relevance) {
-				Candidate **update_me_ptr = std::lower_bound(
-					rc.candidates_ptr,
-					rc.candidates_ptr + rc.candidates_c,
-					update_me,
-					compare_candidate_ptr
-				);
-				Candidate **move_here = std::lower_bound(
-					rc.candidates_ptr,
-					rc.candidates_ptr + rc.candidates_c,
-					&next_state,
-					compare_candidate_ptr
-				) - 1;
-				if (move_here > update_me_ptr) {
-					ui64 distance = move_here - update_me_ptr;
-					memmove(
-						update_me_ptr,
-						update_me_ptr + 1,
-						distance * sizeof(Candidate*)
-					);
-					*move_here = update_me;
-				}
-			}
-		}
-		update_me->exposure = next_state_exposure;
+	for (ui64 i = 0; i < local_page_length; i++)
+		ranking[i].candidate->masked = false;
+	update_exposure(ctx, ranking, local_page_length);
+	if (mode == PART_OF_EXPERIMENT) {
+		unfairness_to_client(group_unfairness(ctx));
+		unfairness_to_client(individual_unfairness(ctx));
 	}
-	f64 unfairness_score = unfairness(ctx);
-	printf("unfairness,%f\n", unfairness_score);
-	//print_rank_candidate_lists(ctx);
 }
 
-void get_candidates(FILE *job_fp, FILE *job_end_fp) {
-	ui64 query_id;
-	if (fread(&query_id, sizeof(ui64), 1, job_fp) != 1)
-		err_exit("error reading query_id\n");
-	f64 quality_threshold;
-	if (fread(&quality_threshold, sizeof(f64), 1, job_fp) != 1)
-		err_exit("error reading quality_threshold\n");
-	auto it = CANDIDATES.find(query_id);
-	Context ctx;
-	if (it == CANDIDATES.end()) {
-		char *the_qrel_file = qrel_file(query_id);
-		FILE *qrel_fp = safe_file_read(the_qrel_file);
-		ui64 len;
-		safe_read_item(&len, sizeof(ui64), qrel_fp);
-		Candidate *candidates_ptr =
-			(Candidate*) malloc(len * sizeof(Candidate));
-		for (ui64 i = 0; i < len; i++) {
-			ui64 doc_id;
-			f64 relevance;
-			ui64 exposure;
-			safe_read_item(&doc_id, sizeof(ui64), qrel_fp);
-			safe_read_item(&relevance, sizeof(f64), qrel_fp);
-			safe_read_item(&exposure, sizeof(ui64), qrel_fp);
-			candidates_ptr[i].doc_id = doc_id;
-			candidates_ptr[i].relevance = relevance;
-			candidates_ptr[i].exposure = exposure;
-			candidates_ptr[i].masked = false;
-		}
-		fclose(qrel_fp);
-		ctx = context_from_sorted_candidates(
-			candidates_ptr, len, quality_threshold
-		);
-		CANDIDATES[query_id] = ctx;
-	} else {
-		ctx = it->second;
-		if (ctx.quality_threshold != quality_threshold) {
-			free_rank_contexts(ctx);
-			build_rank_candidate_lists(&ctx, quality_threshold);
-		}
-		CANDIDATES[query_id] = ctx;
-	}
+void gen_fairco_re_ranking() {
+	set_query(qid_from_client());
+	Context ctx = get_context(0);
 	const ui64 local_page_length = MIN(ctx.candidates_c, PAGE_LENGTH);
 	if (local_page_length == 0) return;
-	ui64 rnk = 1;
-	Candidate **ranking = ranking_buffer();
-	do {
-		RankContext *rc = ctx.rank_contexts_per_rank[rnk - 1];
-		Candidate **candidates_ptr = rc->candidates_ptr;
-		Candidate *candidate;
-		safe_write_item(&rc->candidates_c, sizeof(ui64), job_end_fp);
-		for (ui64 j = 1; j <= rc->candidates_c; j++) {
-			candidate = candidates_ptr[j - 1];
-			safe_write_item(&candidate->doc_id, sizeof(ui64), job_end_fp);
-			safe_write_item(&candidate->relevance, sizeof(f64), job_end_fp);
-		}
-		rnk++;
-	} while (rnk <= local_page_length);
+	gen_fairco_re_ranking_inner(ctx, local_page_length, STANDALONE);
 }
 
-void launch_experiment(FILE *job_fp, FILE *job_end_fp) {
-	ui64 query_id;
-	if (fread(&query_id, sizeof(ui64), 1, job_fp) != 1)
-		err_exit("error reading query_id\n");
-	f64 quality_threshold;
-	if (fread(&quality_threshold, sizeof(f64), 1, job_fp) != 1)
-		err_exit("error reading quality_threshold\n");
-	ui64 repetitions;
-	if (fread(&repetitions, sizeof(ui64), 1, job_fp) != 1)
-		err_exit("error reading repetitions\n");
-	auto it = CANDIDATES.find(query_id);
-	Context ctx;
-	if (it == CANDIDATES.end()) {
-		char *the_qrel_file = qrel_file(query_id);
-		FILE *qrel_fp = safe_file_read(the_qrel_file);
-		ui64 len;
-		safe_read_item(&len, sizeof(ui64), qrel_fp);
-		Candidate *candidates_ptr =
-			(Candidate*) malloc(len * sizeof(Candidate));
-		for (ui64 i = 0; i < len; i++) {
-			ui64 doc_id;
-			f64 relevance;
-			ui64 exposure;
-			safe_read_item(&doc_id, sizeof(ui64), qrel_fp);
-			safe_read_item(&relevance, sizeof(f64), qrel_fp);
-			safe_read_item(&exposure, sizeof(ui64), qrel_fp);
-			candidates_ptr[i].doc_id = doc_id;
-			candidates_ptr[i].relevance = relevance;
-			candidates_ptr[i].exposure = exposure;
-			candidates_ptr[i].masked = false;
-		}
-		fclose(qrel_fp);
-		ctx = context_from_sorted_candidates(
-			candidates_ptr, len, quality_threshold
-		);
-		CANDIDATES[query_id] = ctx;
-	} else {
-		ctx = it->second;
-		if (ctx.quality_threshold != quality_threshold) {
-			free_rank_contexts(ctx);
-			build_rank_candidate_lists(&ctx, quality_threshold);
-		}
-		CANDIDATES[query_id] = ctx;
-	}
+void gen_iaf_re_ranking() {
+	set_query(qid_from_client());
+	f64 quality_threshold = quality_threshold_from_client();
+	Context ctx = get_context(quality_threshold);
+	const ui64 local_page_length = MIN(ctx.candidates_c, PAGE_LENGTH);
+	if (local_page_length == 0) return;
+	gen_iaf_re_ranking_inner(
+		quality_threshold, ctx, local_page_length, STANDALONE
+	);
+}
+
+void fairco_experiment() {
+	set_query(qid_from_client());
+	ui64 repetitions = repetitions_from_client();
+	Context ctx = get_context(0);
+	const ui64 local_page_length = MIN(ctx.candidates_c, PAGE_LENGTH);
+	if (local_page_length == 0) return;
+	for (ui64 rep = 1; rep <= repetitions; ++rep) gen_fairco_re_ranking_inner(
+		ctx,
+		local_page_length,
+		PART_OF_EXPERIMENT
+	);
+}
+
+
+void iaf_experiment() {
+	set_query(qid_from_client());
+	f64 quality_threshold = quality_threshold_from_client();
+	ui64 repetitions = repetitions_from_client();
+	Context ctx = get_context(quality_threshold);
 	const ui64 local_page_length = MIN(ctx.candidates_c, PAGE_LENGTH);
 	if (local_page_length == 0) return;
 	for (ui64 rep = 1; rep <= repetitions; ++rep) {
-		f64 before_weight = 0;
-		f64 min_rel = 0;
-		ui64 rnk = 1;
-		Candidate **ranking = ranking_buffer();
-		do {
-			const RankContext *rc = ctx.rank_contexts_per_rank[rnk - 1];
-			Candidate **candidates_ptr = rc->candidates_ptr;
-			Candidate *candidate;
-			for (ui64 j = 1; j <= rc->candidates_c; j++) {
-				candidate = candidates_ptr[j - 1];
-				if (candidate->relevance >= min_rel && !candidate->masked) {
-					break;
-				}
-			}
-			candidate->masked = true;
-			before_weight += discounted_gain(candidate->relevance, rnk);
-			ranking[rnk - 1] = candidate;
-			rnk++;
-			if (rnk <= local_page_length) {
-				f64 last_weight = 9e99;
-				Candidate* top_candidate = ctx.candidates_ptr;
-				f64 optimistic_dcg_suf = 0;
-				for (ui64 suf_rnk = rnk + 1; suf_rnk <= PAGE_LENGTH; ++suf_rnk) {
-					while (top_candidate->masked) ++top_candidate;
-					last_weight = discounted_gain(
-						top_candidate->relevance,
-						suf_rnk
-					);
-					optimistic_dcg_suf += last_weight;
-					++top_candidate;
-				}
-				min_rel = min_rank_rel(
-					ctx.idcg * ctx.quality_threshold,
-					rnk,
-					before_weight + optimistic_dcg_suf
-				);
-				if (min_rel >= last_weight) {
-					Candidate min_rel_candidate = {0, min_rel, 0, false};
-					Candidate *n_candidate = std::upper_bound(
-						ctx.candidates_ptr,
-						top_candidate,
-						min_rel_candidate,
-						compare_candidate_by_relevance
-					) - 1;
-					do {
-						while (n_candidate->masked) --n_candidate;
-						f64 optimistic_dcg_suf = 0;
-						top_candidate = ctx.candidates_ptr;
-						n_candidate->masked = true;
-						for (ui64 j = rnk + 1; j <= PAGE_LENGTH; ++j) {
-							while (top_candidate->masked) ++top_candidate;
-							optimistic_dcg_suf += discounted_gain(
-								top_candidate->relevance,
-								j
-							);
-							++top_candidate;
-						}
-						n_candidate->masked = false;
-						min_rel = min_rank_rel(
-							ctx.idcg * ctx.quality_threshold,
-							rnk,
-							before_weight + optimistic_dcg_suf
-						);
-					} while ((n_candidate--)->relevance < min_rel);
-				}
-			}
-		} while (rnk <= local_page_length);
-		ui8 *attention = attention_buffer();
-		geometric_attention(attention, 0.40);
-		for (ui64 i = 0; i < local_page_length; i++) ranking[i]->masked = false;
-		std::sort( ranking, ranking + local_page_length, compare_candidate_ptr);
-		for (ui64 rnk = local_page_length; rnk >= 1; --rnk) {
-			Candidate *update_me = ranking[rnk - 1];
-			ui64 next_state_exposure = update_me->exposure + attention[rnk - 1];
-			Candidate next_state = *update_me;
-			next_state.exposure = next_state_exposure;
-			for (ui64 i = 0; i < ctx.rank_contexts_c; ++i) {
-				const RankContext rc = ctx.rank_contexts[i];
-				Candidate last_item = ctx.candidates_ptr[rc.candidates_c - 1];
-				if (update_me->relevance >= last_item.relevance) {
-					Candidate **update_me_ptr = std::lower_bound(
-						rc.candidates_ptr,
-						rc.candidates_ptr + rc.candidates_c,
-						update_me,
-						compare_candidate_ptr
-					);
-					Candidate **move_here = std::lower_bound(
-						rc.candidates_ptr,
-						rc.candidates_ptr + rc.candidates_c,
-						&next_state,
-						compare_candidate_ptr
-					) - 1;
-					if (move_here > update_me_ptr) {
-						ui64 distance = move_here - update_me_ptr;
-						memmove(
-							update_me_ptr,
-							update_me_ptr + 1,
-							distance * sizeof(Candidate*)
-						);
-						*move_here = update_me;
-					}
-				}
-			}
-			update_me->exposure = next_state_exposure;
-		}
-		f64 unfairness_score = unfairness(ctx);
-		safe_write_item(&unfairness_score, sizeof(f64), job_end_fp);
-	}
-}
-
-void set_job_path(PathBuffer buffer, ui64 job_id) {
-	char *path = buffer.buffer;
-	for (int i = 0; i < 16; i++) {
-		char c = (char) ((job_id >> (i * 4)) & 0xF);
-		path[buffer.length + i] = c < 10 ? c + '0' : c - 10 + 'a';
+		gen_iaf_re_ranking_inner(
+			quality_threshold,
+			ctx,
+			local_page_length,
+			PART_OF_EXPERIMENT
+		);
 	}
 }
 
@@ -590,349 +569,263 @@ void start_daemon() {
 	do {
 		FILE *job_queue_fp = safe_file_read(job_queue());
 		ui64 job_id;
-		PathBuffer the_job_start_file_buffer = job_start_file_buffer();
-		PathBuffer the_job_end_fifo_buffer = job_end_fifo_buffer();
-		int out = 0;
-		while (
-			fread(&job_id, sizeof(ui64), 1, job_queue_fp) == 1
-		) {
-			set_job_path(the_job_start_file_buffer, job_id);
-			set_job_path(the_job_end_fifo_buffer, job_id);
-			FILE *job_fp = safe_file_read(the_job_start_file_buffer.buffer);
-			FILE *job_end_fp =
-				safe_file_append(the_job_end_fifo_buffer.buffer);
-			Job job_type;
-			if (fread(&job_type, 1, 1, job_fp) != 1)
+		while (fread(&job_id, sizeof(ui64), 1, job_queue_fp) == 1) {
+			CURRENT_JOB = job_id;
+			set_start_job_path();
+			set_end_job_path();
+			ui8 job_type_ui8;
+			if (fread(&job_type_ui8, 1, 1, read_job_file()) != 1)
 				err_exit("error reading job type\n");
-			switch ((unsigned char) job_type) {
-				case (unsigned char) Job::UPDATE_RELEVANCE:
-					update_relevance(job_fp, job_end_fp);
+			Job job_type = (Job) job_type_ui8;
+			switch (job_type) {
+				case Job::UPDATE_RELEVANCE:
+					update_relevance();
 					break;
-				case (unsigned char) Job::GEN_RANKING:
-					gen_ranking(job_fp, job_end_fp);
+				case Job::GEN_RANKING:
+					gen_iaf_re_ranking();
 					break;
-				case (unsigned char) Job::GET_CANDIDATES:
-					get_candidates(job_fp, job_end_fp);
+				case Job::GEN_FAIRCO_RE_RANKING:
+					gen_fairco_re_ranking();
 					break;
-				case (unsigned char) Job::LAUNCH_EXPERIMENT:
-					launch_experiment(job_fp, job_end_fp);
+				case Job::GET_CANDIDATES:
+					get_candidates();
 					break;
+				case Job::LAUNCH_IAF_EXPERIMENT:
+					iaf_experiment();
+					break;
+				case Job::LAUNCH_FAIRCO_EXPERIMENT:
+					fairco_experiment();
+					break;
+				case Job::STOP_DAEMON:
+					exit(0);
 			}
-			fclose(job_fp);
-			safe_file_remove(the_job_start_file_buffer.buffer);
-			fclose(job_end_fp);
-			safe_file_remove(the_job_end_fifo_buffer.buffer);
+			fclose(JOB_FILE);
+			JOB_FILE = NULL;
+			safe_file_remove(job_start_path_buffer().buffer);
+			fclose(write_job_end_file());
+			JOB_END_FILE = NULL;
+			safe_file_remove(job_end_fifo_buffer().buffer);
 		}
 		fclose(job_queue_fp);
 	} while (true);
 }
 
-void rerank(char *input_buffer, f64 quality_threshold) {
-	char c;
-	ui64 offset = 0;
-	ui64 job_id = t();
-	while ((c = getchar()) != EOF) {
-		if (c == '\t') err_exit(
-			"expected query ID alone on first input line, "
-			"got multiple columns"
-		);
-		else if (c == '\n') break;
-		input_buffer[offset++] = c;
+void queue_job() {
+	if (JOB_FILE != NULL) {
+		fclose(JOB_FILE);
+		JOB_FILE = NULL;
 	}
-	input_buffer[offset] = '\0';
-	ui64 qid = gen_id(input_buffer);
-	std::unordered_set<ui64> doc_hashes;
-	PathBuffer the_job_start_file_buffer = job_start_file_buffer();
-	char *job_file = the_job_start_file_buffer.buffer;
-	set_job_path(the_job_start_file_buffer, job_id);
-	FILE *job_fp = init_job_file(job_file, Job::UPDATE_RELEVANCE);
-	safe_write_item(&qid, sizeof(ui64), job_fp);
-	safe_write_item(&quality_threshold, sizeof(f64), job_fp);
-	while (c != EOF) {
-		offset = 0;
-		while ((c = getchar()) != EOF) {
-			if (c == '\t') break;
-			else if (c == '\n') err_exit(
-				"too few columns: "
-				"input should be two columns, tab-separated"
-			);
-			input_buffer[offset++] = c;
-		}
-		if (c == EOF) break;
-		input_buffer[offset] = '\0';
-		ui64 doc_id = gen_id(input_buffer);
-		offset = 0;
-		while ((c = getchar()) != EOF) {
-			if (c == '\n') break;
-			if (c == '\t') err_exit(
-				"too many columns: "
-				"input should be two columns, tab-separated"
-			);
-			input_buffer[offset++] = c;
-		}
-		input_buffer[offset] = '\0';
-		f64 relevance = atof(input_buffer);
-		safe_write_item(&doc_id, sizeof(ui64), job_fp);
-		safe_write_item(&relevance, sizeof(f64), job_fp);
-		if (doc_hashes.find(doc_id) != doc_hashes.end()) {
-			fclose(job_fp);
-			safe_file_remove(job_file);
-			err_exit("duplicate doc_id");
-		} else doc_hashes.insert(doc_id);
-	}
-	fclose(job_fp);
-	FILE *job_queue_fp = safe_file_append(job_queue());
-	PathBuffer the_job_end_fifo_buffer = job_end_fifo_buffer();
-	FILE *job_end_fp;
-	if (doc_hashes.size() == 0) {
-		safe_file_remove(job_file);
-	} else {
-		doc_hashes.clear();
-		set_job_path(the_job_end_fifo_buffer, job_id);
-		if (mkfifo(the_job_end_fifo_buffer.buffer, 0600) == -1)
-			err_exit("mkfifo");
-		safe_write_item(&job_id, sizeof(ui64), job_queue_fp);
-		fflush(job_queue_fp);
-		job_end_fp = safe_file_read(the_job_end_fifo_buffer.buffer);
-		fclose(job_end_fp);
-	}
-	ui64 new_job_id = t();
-	set_job_path(the_job_start_file_buffer, new_job_id);
-	set_job_path(the_job_end_fifo_buffer, new_job_id);
-	job_fp = init_job_file(job_file, Job::GEN_RANKING);
-	safe_write_item(&qid, sizeof(ui64), job_fp);
-	safe_write_item(&quality_threshold, sizeof(f64), job_fp);
-	fclose(job_fp);
-	if (mkfifo(the_job_end_fifo_buffer.buffer, 0600) == -1) err_exit("mkfifo");
-	safe_write_item(&new_job_id, sizeof(ui64), job_queue_fp);
-	fflush(job_queue_fp);
-	job_end_fp = safe_file_read(the_job_end_fifo_buffer.buffer);
-	bool one_result_found = false;
-	do {
-		ui64 doc_id;
-		if (fread(&doc_id, sizeof(ui64), 1, job_end_fp) != 1)
-			break;
-		one_result_found = true;
-		get_orig_doc_id(doc_id, input_buffer);
-		printf("%s\n", input_buffer);
-	} while (true);
-	if (!one_result_found) err_exit("qid results not loaded previously");
-	fclose(job_end_fp);
-	fclose(job_queue_fp);
-	f64 relevance = atof(input_buffer);
+	if (mkfifo(job_end_fifo_buffer().buffer, 0600) == -1)
+		err_exit("mkfifo");
+	safe_write_item(&CURRENT_JOB, sizeof(job_id), append_queue());
+	fflush(stdout);
+	fflush(append_queue());
+	read_job_end_file();
 }
 
-void show_candidates(char *input_buffer, f64 quality_threshold) {
-	char c;
+docid docid_from_stdin(char &c) {
 	ui64 offset = 0;
-	ui64 job_id = t();
-	while ((c = getchar()) != EOF) {
-		if (c == '\t') err_exit(
-			"expected query ID alone on first input line, "
-			"got multiple columns"
-		);
-		else if (c == '\n') break;
-		input_buffer[offset++] = c;
-	}
-	input_buffer[offset] = '\0';
-	ui64 qid = gen_id(input_buffer);
-	std::unordered_set<ui64> doc_hashes;
-	PathBuffer the_job_start_file_buffer = job_start_file_buffer();
-	char *job_file = the_job_start_file_buffer.buffer;
-	set_job_path(the_job_start_file_buffer, job_id);
-	FILE *job_fp = init_job_file(job_file, Job::UPDATE_RELEVANCE);
-	safe_write_item(&qid, sizeof(ui64), job_fp);
-	safe_write_item(&quality_threshold, sizeof(f64), job_fp);
-	while (c != EOF) {
-		offset = 0;
-		while ((c = getchar()) != EOF) {
-			if (c == '\t') break;
-			else if (c == '\n') err_exit(
-				"too few columns: "
-				"input should be two columns, tab-separated"
-			);
-			input_buffer[offset++] = c;
-		}
+	char *focus_buffer = get_focus_buffer();
+	while (true) {
+		c = getchar();
+		if (c == '\t') break;
+		if (c == '\n') break;
 		if (c == EOF) break;
-		input_buffer[offset] = '\0';
-		ui64 doc_id = gen_id(input_buffer);
-		offset = 0;
-		while ((c = getchar()) != EOF) {
-			if (c == '\n') break;
-			if (c == '\t') err_exit(
-				"too many columns: "
-				"input should be two columns, tab-separated"
-			);
-			input_buffer[offset++] = c;
-		}
-		input_buffer[offset] = '\0';
-		f64 relevance = atof(input_buffer);
-		safe_write_item(&doc_id, sizeof(ui64), job_fp);
-		safe_write_item(&relevance, sizeof(f64), job_fp);
-		if (doc_hashes.find(doc_id) != doc_hashes.end()) {
-			fclose(job_fp);
-			safe_file_remove(job_file);
-			err_exit("duplicate doc_id");
-		} else doc_hashes.insert(doc_id);
+		focus_buffer[offset++] = c;
 	}
-	fclose(job_fp);
-	FILE *job_queue_fp = safe_file_append(job_queue());
-	PathBuffer the_job_end_fifo_buffer = job_end_fifo_buffer();
-	FILE *job_end_fp;
-	if (doc_hashes.size() == 0) {
-		safe_file_remove(job_file);
-	} else {
+	focus_buffer[offset] = '\0';
+	return gen_id();
+}
+
+f64 relevance_from_stdin(char &c) {
+	ui64 offset = 0;
+	char *focus_buffer = get_focus_buffer();
+	while (true) {
+		c = getchar();
+		if (c == '\t') break;
+		if (c == '\n') break;
+		if (c == EOF) break;
+		focus_buffer[offset++] = c;
+	}
+	focus_buffer[offset] = '\0';
+	return atof(focus_buffer);
+}
+
+gid group_from_stdin(char &c) {
+	ui64 offset = 0;
+	char *focus_buffer = get_focus_buffer();
+	while (true) {
+		c = getchar();
+		if (c == '\t') break;
+		if (c == '\n') break;
+		if (c == EOF) break;
+		focus_buffer[offset++] = c;
+	}
+	focus_buffer[offset] = '\0';
+	return atoi(focus_buffer);
+}
+
+ui64 client_update_relevance(f64 quality_threshold) {
+	new_job();
+	char c;
+	qid query = qid_from_stdin(c);
+	if (c == '\t') expected_qid_alone_err();
+	std::unordered_set<ui64> doc_hashes;
+	init_job_file(Job::UPDATE_RELEVANCE);
+	qid_to_daemon(query);
+	quality_threshold_to_daemon(quality_threshold);
+	while (c != EOF) {
+		docid doc = docid_from_stdin(c);
+		if (c == '\n') too_few_columns_err();
+		if (c == EOF) break;
+		f64 relevance = relevance_from_stdin(c);
+		gid group = c == '\t' ? group_from_stdin(c) : NO_GROUP;
+		doc_to_daemon(doc);
+		relevance_to_daemon(relevance);
+		group_to_daemon(group);
+		if (doc_hashes.find(doc) != doc_hashes.end()) {
+			doc_hashes.clear();
+			cancel_job();
+			duplicate_doc_id_err();
+		} else doc_hashes.insert(doc);
+	}
+	if (doc_hashes.size() == 0)
+		safe_file_remove(job_start_path_buffer().buffer);
+	else {
 		doc_hashes.clear();
-		set_job_path(the_job_end_fifo_buffer, job_id);
-		if (mkfifo(the_job_end_fifo_buffer.buffer, 0600) == -1)
-			err_exit("mkfifo");
-		safe_write_item(&job_id, sizeof(ui64), job_queue_fp);
-		fflush(job_queue_fp);
-		job_end_fp = safe_file_read(the_job_end_fifo_buffer.buffer);
-		fclose(job_end_fp);
+		queue_job();
 	}
-	ui64 new_job_id = t();
-	set_job_path(the_job_start_file_buffer, new_job_id);
-	set_job_path(the_job_end_fifo_buffer, new_job_id);
-	job_fp = init_job_file(job_file, Job::GET_CANDIDATES);
-	safe_write_item(&qid, sizeof(ui64), job_fp);
-	safe_write_item(&quality_threshold, sizeof(f64), job_fp);
-	fclose(job_fp);
-	if (mkfifo(the_job_end_fifo_buffer.buffer, 0600) == -1) err_exit("mkfifo");
-	safe_write_item(&new_job_id, sizeof(ui64), job_queue_fp);
-	fflush(job_queue_fp);
-	job_end_fp = safe_file_read(the_job_end_fifo_buffer.buffer);
+	return query;
+}
+
+void iaf_rerank(f64 quality_threshold) {
+	qid query = client_update_relevance(quality_threshold);
+	new_job();
+	init_job_file(Job::GEN_RANKING);
+	qid_to_daemon(query);
+	quality_threshold_to_daemon(quality_threshold);
+	queue_job();
 	bool one_result_found = false;
 	do {
-		ui64 candidates_c;
-		if (fread(&candidates_c, sizeof(ui64), 1, job_end_fp) != 1)
+		docid doc;
+		if (!doc_from_daemon(doc)) break;
+		one_result_found = true;
+		get_orig_doc_id(doc);
+		printf("%s\n", get_focus_buffer());
+	} while (true);
+	if (!one_result_found) qid_unknown_err();
+}
+
+void fairco_rerank() {
+	qid query = client_update_relevance(0);
+	new_job();
+	init_job_file(Job::GEN_FAIRCO_RE_RANKING);
+	safe_write_item(&query, sizeof(qid), write_job_file());
+	queue_job();
+	bool one_result_found = false;
+	do {
+		docid doc;
+		if (fread(&doc, sizeof(docid), 1, read_job_end_file()) != 1)
 			break;
+		one_result_found = true;
+		get_orig_doc_id(doc);
+		printf("%s\n", get_focus_buffer());
+	} while (true);
+	if (!one_result_found) qid_unknown_err();
+}
+
+void show_candidates(f64 quality_threshold) {
+	qid query = client_update_relevance(quality_threshold);
+	new_job();
+	init_job_file(Job::GET_CANDIDATES);
+	qid_to_daemon(query);
+	quality_threshold_to_daemon(quality_threshold);
+	queue_job();
+	bool one_result_found = false;
+	ui64 valid_docs;
+	if (!ui64_from_daemon(valid_docs)) err_exit("error reading valid docs\n");
+	for (ui64 i = 0; i < valid_docs; i++) {
+		docid doc;
+		if (!doc_from_daemon(doc)) err_exit("error reading doc\n");
+		f64 relevance = relevance_from_daemon();
+		get_orig_doc_id(doc);
+		printf(i == 0 ? "%s\t" : "\t%s\t", get_focus_buffer(), relevance);
+		compact_print_float(relevance, 20);
+	}
+	printf("\n");
+	do {
+		ui64 candidates_c;
+		if (!ui64_from_daemon(candidates_c)) break;
 		for (ui64 i = 0; i < candidates_c; i++) {
-			ui64 doc_id;
-			f64 relevance;
-			if (fread(&doc_id, sizeof(ui64), 1, job_end_fp) != 1)
-				err_exit("error reading doc_id\n");
-			if (fread(&relevance, sizeof(f64), 1, job_end_fp) != 1) {
-				err_exit("error reading relevance (X)\n");
-			}
-			get_orig_doc_id(doc_id, input_buffer);
-			if (i == 0) printf("%s\t", input_buffer);
-			else printf("\t%s\t", input_buffer);
-			compact_print_float(relevance);
+			docid doc;
+			if (!doc_from_daemon(doc)) err_exit("error reading doc\n");
+			get_orig_doc_id(doc);
+			printf(i == 0 ? "%s\t" : "\t%s\t", get_focus_buffer());
 		}
 		printf("\n");
 		one_result_found = true;
 	} while (true);
-	if (!one_result_found) err_exit("qid results not loaded previously");
-	fclose(job_end_fp);
-	fclose(job_queue_fp);
-	f64 relevance = atof(input_buffer);
+	if (!one_result_found) qid_unknown_err();
 }
 
-void start_experiment(
-	char *input_buffer,
-	f64 quality_threshold,
-	ui64 repetitions
-) {
-	char c;
-	ui64 offset = 0;
-	ui64 job_id = t();
-	while ((c = getchar()) != EOF) {
-		if (c == '\t') err_exit(
-			"expected query ID alone on first input line, "
-			"got multiple columns"
+void iaf_experiment(f64 quality_threshold, ui64 repetitions) {
+	qid query = client_update_relevance(quality_threshold);
+	new_job();
+	init_job_file(Job::LAUNCH_IAF_EXPERIMENT);
+	qid_to_daemon(query);
+	quality_threshold_to_daemon(quality_threshold);
+	repetitions_to_daemon(repetitions);
+	queue_job();
+	get_orig_doc_id(query);
+	for (ui64 rep = 1; rep <= repetitions; ++rep)
+		printf(
+			"%s\t%lf\t%lu\t%lf\t%lf\n",
+			get_focus_buffer(),
+			quality_threshold,
+			rep,
+			unfairness_from_daemon(),
+			unfairness_from_daemon()
 		);
-		else if (c == '\n') break;
-		input_buffer[offset++] = c;
-	}
-	input_buffer[offset] = '\0';
-	ui64 qid = gen_id(input_buffer);
-	std::unordered_set<ui64> doc_hashes;
-	PathBuffer the_job_start_file_buffer = job_start_file_buffer();
-	char *job_file = the_job_start_file_buffer.buffer;
-	set_job_path(the_job_start_file_buffer, job_id);
-	FILE *job_fp = init_job_file(job_file, Job::UPDATE_RELEVANCE);
-	safe_write_item(&qid, sizeof(ui64), job_fp);
-	safe_write_item(&quality_threshold, sizeof(f64), job_fp);
-	while (c != EOF) {
-		offset = 0;
-		while ((c = getchar()) != EOF) {
-			if (c == '\t') break;
-			else if (c == '\n') err_exit(
-				"too few columns: "
-				"input should be two columns, tab-separated"
-			);
-			input_buffer[offset++] = c;
-		}
-		if (c == EOF) break;
-		input_buffer[offset] = '\0';
-		ui64 doc_id = gen_id(input_buffer);
-		offset = 0;
-		while ((c = getchar()) != EOF) {
-			if (c == '\n') break;
-			if (c == '\t') err_exit(
-				"too many columns: "
-				"input should be two columns, tab-separated"
-			);
-			input_buffer[offset++] = c;
-		}
-		input_buffer[offset] = '\0';
-		f64 relevance = atof(input_buffer);
-		safe_write_item(&doc_id, sizeof(ui64), job_fp);
-		safe_write_item(&relevance, sizeof(f64), job_fp);
-		if (doc_hashes.find(doc_id) != doc_hashes.end()) {
-			fclose(job_fp);
-			safe_file_remove(job_file);
-			err_exit("duplicate doc_id");
-		} else doc_hashes.insert(doc_id);
-	}
-	fclose(job_fp);
-	FILE *job_queue_fp = safe_file_append(job_queue());
-	PathBuffer the_job_end_fifo_buffer = job_end_fifo_buffer();
-	FILE *job_end_fp;
-	if (doc_hashes.size() == 0) {
-		safe_file_remove(job_file);
-	} else {
-		doc_hashes.clear();
-		set_job_path(the_job_end_fifo_buffer, job_id);
-		if (mkfifo(the_job_end_fifo_buffer.buffer, 0600) == -1)
-			err_exit("mkfifo");
-		safe_write_item(&job_id, sizeof(ui64), job_queue_fp);
-		fflush(job_queue_fp);
-		job_end_fp = safe_file_read(the_job_end_fifo_buffer.buffer);
-		fclose(job_end_fp);
-	}
-	ui64 new_job_id = t();
-	set_job_path(the_job_start_file_buffer, new_job_id);
-	set_job_path(the_job_end_fifo_buffer, new_job_id);
-	job_fp = init_job_file(job_file, Job::LAUNCH_EXPERIMENT);
-	safe_write_item(&qid, sizeof(ui64), job_fp);
-	safe_write_item(&quality_threshold, sizeof(f64), job_fp);
-	safe_write_item(&repetitions, sizeof(ui64), job_fp);
-	fclose(job_fp);
-	if (mkfifo(the_job_end_fifo_buffer.buffer, 0600) == -1) err_exit("mkfifo");
-	safe_write_item(&new_job_id, sizeof(ui64), job_queue_fp);
-	fflush(job_queue_fp);
-	job_end_fp = safe_file_read(the_job_end_fifo_buffer.buffer);
-	get_orig_doc_id(qid, input_buffer);
-	for (ui64 rep = 1; rep <= repetitions; ++rep) {
-		f64 unfairness;
-		if (fread(&unfairness, sizeof(f64), 1, job_end_fp) != 1)
-			err_exit("error reading unfairness\n");
+}
 
-		printf("%s\t%lf\t%lu\t%lf\n", input_buffer, quality_threshold, rep, unfairness);
+void fairco_experiment(ui64 repetitions) {
+	qid query = client_update_relevance(0);
+	new_job();
+	init_job_file(Job::LAUNCH_FAIRCO_EXPERIMENT);
+	qid_to_daemon(query);
+	repetitions_to_daemon(repetitions);
+	queue_job();
+	get_orig_doc_id(query);
+	for (ui64 rep = 1; rep <= repetitions; ++rep)
+		printf(
+			"%s\t%lu\t%lf\t%lf\n",
+			get_focus_buffer(),
+			rep,
+			unfairness_from_daemon(),
+			unfairness_from_daemon()
+		);
+}
+
+RerankMethod rerank_method_from_argv(int &argc, char ***argv) {
+	if (argc == 0) return RerankMethod::INDIVIDUAL_AMORTIZED_FAIRNESS;
+	if (strcmp(**argv, "iaf") == 0) {
+		(*argv)++;
+		argc--;
+		return RerankMethod::INDIVIDUAL_AMORTIZED_FAIRNESS;
 	}
-	fclose(job_end_fp);
-	fclose(job_queue_fp);
+	if (strcmp(**argv, "fairco") == 0) {
+		(*argv)++;
+		argc--;
+		return RerankMethod::GROUP_FAIRCO;
+	}
+	return RerankMethod::INDIVIDUAL_AMORTIZED_FAIRNESS;
 }
 
 int main(int argc, char *argv[]) {
-	char *EXECUTABLE_NAME = argv[0];
 	argv++;
 	argc--;
 	Subcommand subcommand;
 	bool input_pipe_open = !isatty(fileno(stdin));
-	char *input_buffer = (char*) malloc(INPUT_BUFFER_SIZE);
 	if (argc == 0) subcommand = input_pipe_open ? RERANK : HELP;
 	else if (strcmp(*argv, "help") == 0) subcommand = HELP;
 	else if (strcmp(*argv, "rerank") == 0) subcommand = RERANK;
@@ -948,6 +841,7 @@ int main(int argc, char *argv[]) {
 	argc--;
 	bool extra_args = argc > 0;
 	f64 quality_threshold;
+	RerankMethod method;
 	switch (subcommand) {
 		case HELP:
 			if (!extra_args && !input_pipe_open)
@@ -964,16 +858,20 @@ int main(int argc, char *argv[]) {
 		case RERANK:
 			if (!input_pipe_open)
 				print_subcommand_help_then_halt(RERANK, 1);
-			if (extra_args) quality_threshold = atof(*argv);
-			else quality_threshold = 0.99;
-			rerank(input_buffer, quality_threshold);
+			method = rerank_method_from_argv(argc, &argv);
+			extra_args = argc > 0;
+			if (method == RerankMethod::INDIVIDUAL_AMORTIZED_FAIRNESS) {
+				if (extra_args) quality_threshold = atof(*argv);
+				else quality_threshold = 0.99;
+				iaf_rerank(quality_threshold);
+			} else if (method == RerankMethod::GROUP_FAIRCO) fairco_rerank();
 			break;
 		case SHOW_CANDIDATES:
 			if (!input_pipe_open)
 				print_subcommand_help_then_halt(RERANK, 1);
 			if (extra_args) quality_threshold = atof(*argv);
 			else quality_threshold = 0.99;
-			show_candidates(input_buffer, quality_threshold);
+			show_candidates(quality_threshold);
 			break;
 		case DAEMON:
 			if (extra_args || input_pipe_open)
@@ -983,13 +881,40 @@ int main(int argc, char *argv[]) {
 		case EXPERIMENT:
 			if (!extra_args || !input_pipe_open)
 				print_subcommand_help_then_halt(EXPERIMENT, 1);
-			quality_threshold = atof(*argv);
-			argv++;
+			method = rerank_method_from_argv(argc, &argv);
+			extra_args = argc > 0;
 			ui64 repetitions;
-			repetitions = atoll(*argv);
-			start_experiment(input_buffer, quality_threshold, repetitions);
+			if (method == RerankMethod::INDIVIDUAL_AMORTIZED_FAIRNESS) {
+				if (extra_args) {
+					printf("Extra args\n");
+					printf("%s\n", *argv);
+					quality_threshold = atof(*argv);
+					argv++;
+					argc--;
+					extra_args = argc > 0;
+					if (extra_args) {
+						repetitions = atoll(*argv);
+						argv++;
+						argc--;
+					}
+					else repetitions = 3000;
+				} else {
+					quality_threshold = 0.99;
+					repetitions = 3000;
+				}
+				printf("Quality threshold: %lf\n", quality_threshold);
+				iaf_experiment(quality_threshold, repetitions);
+			} else if (method == RerankMethod::GROUP_FAIRCO) {
+				if (extra_args) {
+					repetitions = atoll(*argv);
+					argv++;
+					argc--;
+				}
+				else repetitions = 3000;
+				fairco_experiment(repetitions);
+			}
 			break;
-		default:
-			print_general_help_then_halt();
+		case BAD_SUBCOMMAND:
+	   	 print_general_help_then_halt();
 	}
 }

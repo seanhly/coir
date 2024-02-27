@@ -18,7 +18,8 @@ void click_model_attention(ui8 *attention, Candidate *candidates) {
 	double *attention_double = (double*) attention;
 	attention_double[0] = 1;
 	for (int i = 1; i < PAGE_LENGTH; ++i)
-		attention_double[i] = attention_double[i - 1] * (1 - candidates[i - 1].relevance);
+		attention_double[i] =
+			attention_double[i - 1] * (1 - candidates[i - 1].relevance);
 	for (int i = 0; i < PAGE_LENGTH; ++i)
 		attention_double[i] *= attention_double[i] * candidates[i].relevance;
 	for (int i = 1; i < PAGE_LENGTH; ++i)

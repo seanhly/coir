@@ -1,5 +1,8 @@
 #!/usr/bin/env swipl
 
+% Necessary for aggregate_all.
+:- use_module(library(aggregate)).
+
 % This is necessary for SWI-Prolog scripts run as standalone programs.
 :- initialization(main, main).
 
@@ -12,18 +15,15 @@ main :-
 	get_threshold_from_arg(Argv, T),
     read_string(user_input, "", "", _, Input),
     string_chars(Input, Chars),
-    candidate_file(X, Chars, []),
-    print(X),
+    candidate_file(Candidates, Chars, []),
+    print(Candidates),
     nl,
-    print(Y),
-    nl,
-	\+find_best(
-		better_solution,
-		quality_re_ranking,
-		[X, _, T]
+	aggregate_all(
+		min(Unfairness, ReRanking),
+		quality_re_ranking(Candidates, ReRanking, T, Unfairness),
+		min(_, ReRanking)
 	),
-	solution_count(C),
-	write(C), nl,
+	write(ReRanking), nl,
     nl,
     halt.
 
@@ -48,38 +48,6 @@ better_solution([_,L1,_],[_,L2,_]) :-
 print100(X) :- 0 is X mod 1000, print(X), nl, !.
 print100(_).
 
-find_best(IsBetter, Functor, Template) :-
-	unify(Template, FirstArgs),
-	unify(Template, Args),
-	FirstPred =.. [Functor|FirstArgs],
-	OtherPred =.. [Functor|Args],
-	FirstPred,
-	assertz(best_solution(FirstArgs)),
-	assertz(solution_count(0)),
-	retractall(seen_candidate(_, possible_solution)),
-	!,
-	%guitracer, trace, 
-	OtherPred,
-	(
-		solution_count(C),
-		NextCount is C + 1,
-		%print100(NextCount),
-		retractall(solution_count(C)),
-		assertz(solution_count(NextCount))
-	),
-	(
-		best_solution(PreviousBest),
-		IsBetterPred =.. [IsBetter,Args,PreviousBest],
-		(
-			IsBetterPred,
-			retractall(best_solution(PreviousBest)),
-			assertz(best_solution(Args))
-			;
-			\+IsBetterPred
-		)
-	),
-	fail.
-
 dcg(L, DCG) :-
 	dcg(1, L, 0, DCG), !.
 
@@ -93,19 +61,39 @@ dcg(Rank, [_:Rel:_|Remainder], RunningDCG, DCG) :-
 	dcg(NextRank, Remainder, NextDCG, DCG), !.
 dcg(_, [], X, X) :- !.
 
+bulk_if_metrics([], R, E, R, E).
+bulk_if_metrics([_:Relevance:Exposure|T], RunningR, RunningE, EndR, EndE) :-
+	NextR is RunningR + Relevance,
+	NextE is RunningE + Exposure,
+	bulk_if_metrics(T, NextR, NextE, EndR, EndE).
+negative_to_0(U, PU) :- U < 0 -> PU = 0 ; PU = U.
+item_unfairness(Relevance, Exposure, TotalRelevance, TotalExposure, Unfairness) :-
+	SignedItemUnfairness is TotalExposure / TotalRelevance - Exposure / Relevance,
+	negative_to_0(SignedItemUnfairness, Unfairness).
+individual_unfairness([], _, _, Unfairness, Unfairness).
+individual_unfairness([_:R:E|Tail], TotalR, TotalE, RunningU, Unfairness) :-
+	item_unfairness(R, E, TotalR, TotalE, IU),
+	NextU is RunningU + IU,
+	individual_unfairness(Tail, TotalR, TotalE, NextU, Unfairness).
+individual_unfairness(Ranking, Unfairness) :-
+	bulk_if_metrics(Ranking, 0, 0, TotalRelevance, TotalExposure),
+	individual_unfairness(Ranking, TotalRelevance, TotalExposure, 0, Unfairness).
+	
+
 quality_re_ranking(
 	Candidates,
 	ReRanking,
-	QualityThreshold
+	QualityThreshold,
+	Unfairness
 ) :-
-    AttSum = 0,
     rel_sum(Candidates, RelSum),
     print([rel,RelSum]), nl,
     best_ranking_dcg(1, Candidates, 0, IDCG),
     MinDCG is IDCG * QualityThreshold,
     print(MinDCG), nl,
     !,
-    quality_re_ranking_dcg(1, Candidates, ReRanking, MinDCG)
+    quality_re_ranking_dcg(1, Candidates, ReRanking, MinDCG),
+	individual_unfairness(ReRanking, Unfairness)
     % , print(ReRanking), nl
     .
 
@@ -124,18 +112,13 @@ rel_sum(Candidates, RelSum) :-
 	sum_list(Rels, RelSum).
 
 
-quality_re_ranking_dcg(Rank, [], [], _).
-quality_re_ranking_dcg(Rank, [H|T], [DocID:Rel:PrevExposure|NextRanks], MinDCG) :-
+quality_re_ranking_dcg(_, [], [], _).
+quality_re_ranking_dcg(Rank, [H|T], [DocID:Rel:_|NextRanks], MinDCG) :-
 	any_unseen_candidate(H, DocID:Rel, possible_solution),
 	gain(Rank, Rel, Gain),
 	NextRank is Rank + 1,
-	assertz(seen_candidate(DocID, dcg)),
-	best_ranking_dcg(NextRank, T, Gain, DCG), % also retracts the above.
+	best_ranking_dcg(NextRank, T, Gain, DCG),
 	DCG >= MinDCG,
-	(
-		assertz(seen_candidate(DocID, possible_solution));
-		retract(seen_candidate(DocID, possible_solution)), fail
-	),
 	NextMinDCG is MinDCG - Gain,
 	quality_re_ranking_dcg(NextRank, T, NextRanks, NextMinDCG).
 
@@ -151,11 +134,9 @@ best_unseen_candidate([DocID:Rel:_|_], DocID:Rel, Scope) :-
 best_unseen_candidate([_:_:_|T], C, Scope) :-
 	best_unseen_candidate(T, C, Scope).
 
-best_ranking_dcg(_, [], DCG, DCG) :-
-	retractall(seen_candidate(_, dcg)).
+best_ranking_dcg(_, [], DCG, DCG).
 best_ranking_dcg(Rank, [H|T], RunningDCG, DCG) :-
-	best_unseen_candidate(H, DocID:Rel, dcg),
-	assertz(seen_candidate(DocID, dcg)),
+	best_unseen_candidate(H, _:Rel, dcg),
 	NextRank is Rank + 1,
 	gain(Rank, Rel, Gain),
 	NextRunningDCG is RunningDCG + Gain,

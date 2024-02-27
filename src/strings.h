@@ -7,10 +7,10 @@ const char *HELP_HELP_MESSAGE =
 "Prints help information (generally or for a specific subcommand)."
 ;
 const char *RERANK_HELP_MESSAGE =
-"Usage: lrr rerank [QID]\n"
+"Usage: lrr iaf_rerank [QID]\n"
 "       lrr [QID]\n"
-"       lrr rerank [QID] < [QREL_FILE (1)]\n"
-"       lrr rerank < [QREL_FILE (2)]\n"
+"       lrr iaf_rerank [QID] < [QREL_FILE (1)]\n"
+"       lrr iaf_rerank < [QREL_FILE (2)]\n"
 "\n"
 "Produces a re-ranking for the documents in the QREL_FILE, given a query ID."
 "\n"
