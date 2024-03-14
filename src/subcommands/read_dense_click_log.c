@@ -48,14 +48,13 @@ void read_dense_click_log() {
 				ui32 total_mass;
 				for (ui16 j = 0; j < max_rank; ++j) {
 					safe_read(&total_mass, sizeof(ui32), stdin);
-					printf("\t\tTOTAL: %u ", total_mass);
+					printf("\t\tTOTAL: %u\n", total_mass);
 					ui32 mass;
 					for (ui32 k = 0; k < total_mass; k += mass) {
 						safe_read(&doc, sizeof(ui32), stdin);
 						safe_read(&mass, sizeof(ui32), stdin);
-						printf("doc:%u(%u) ", doc, mass);
+						printf("\t\t\tdoc:%u(%u)\n", doc, mass);
 					}
-					printf("\n");
 				}
 			}
 		}

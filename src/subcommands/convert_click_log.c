@@ -38,8 +38,20 @@ void print_query(Query query) {
 	for (ui32 i = 0; i < query.session_c; ++i) {
 		fwrite(&query.sessions[i].sid, sizeof(ui32), 1, stdout);
 		fwrite(&query.sessions[i].duplicates, sizeof(ui32), 1, stdout);
-		fwrite(&query.sessions[i].click_c, sizeof(ui16), 1, stdout);
-		for (ui32 j = 0; j < query.sessions[i].click_c; ++j) {
+		ui16 prev_pos = query.sessions[i].clicks[0].pos;
+		ui32 click_c = 1;
+		bool valid_tail = true;
+		while (valid_tail && click_c < query.sessions[i].click_c) {
+			i32 pos = query.sessions[i].clicks[click_c].pos;
+			i32 gap = pos - prev_pos;
+			valid_tail = gap >= -128 && gap <= 127;
+			if (valid_tail) {
+				prev_pos = pos;
+				click_c++;
+			}
+		}
+		fwrite(&click_c, sizeof(ui16), 1, stdout);
+		for (ui32 j = 0; j < click_c; ++j) {
 			fwrite(&query.sessions[i].clicks[j].pos, sizeof(ui16), 1, stdout);
 			fwrite(&query.sessions[i].clicks[j].doc, sizeof(ui32), 1, stdout);
 		}
@@ -218,6 +230,7 @@ void convert_click_log() {
 						query.sessions[i].duplicates =
 							query.sessions[j].duplicates;
 						query.sessions[i].sid = query.sessions[j].sid;
+						// TODO can this be done faster using basic pointer move?
 						for (ui32 k = 0; k < query.sessions[j].click_c; ++k) {
 							query.sessions[i].clicks[k].pos =
 								query.sessions[j].clicks[k].pos;

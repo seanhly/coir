@@ -31,21 +31,21 @@ void click_log_predict_rankings() {
 	ui32 doc;
 	ui16 highest_rank;
 	ui16 rank_c;
-	std::unordered_map<ui32, ui32> rank_doc_mass_map[500];
-	bool masked_ranks[500];
+	std::unordered_map<ui32, ui32> *rank_doc_mass_map =
+		(std::unordered_map<ui32, ui32>*) malloc(sizeof(std::unordered_map<ui32, ui32>) * MAX_RANK);
+	for (ui16 i = 0; i < MAX_RANK; ++i) rank_doc_mass_map[i] = std::unordered_map<ui32, ui32>();
+	bool *masked_ranks = (bool*) malloc(sizeof(bool) * MAX_RANK);
 	std::unordered_set<ui32> masked_docs;
 	ui32 buff_size = 1000000;
 	char *buffer = (char*) malloc(buff_size);
 	FILE *memstream = fmemopen(buffer, buff_size, "rb+");
-	UI32Tuple *ranking_buff = (UI32Tuple*) malloc(sizeof(UI32Tuple) * 500);
+	UI32Tuple *ranking_buff = (UI32Tuple*) malloc(sizeof(UI32Tuple) * MAX_RANK);
 	UI32Tuple *schrodinger_buff =
 		(UI32Tuple*) malloc(sizeof(UI32Tuple) * 100000);
 	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
-		fprintf(stderr, "QID: %u\n", qid);
-		for (ui16 i = 0; i < 500; ++i) rank_doc_mass_map[i].clear();
+		for (ui16 i = 0; i < MAX_RANK; ++i) rank_doc_mass_map[i].clear();
 		rewind(memstream);
 		safe_read(&session_c, sizeof(ui32), stdin);
-		fprintf(stderr, "SESSION_C: %u\n", session_c);
 		fwrite(&session_c, sizeof(ui32), 1, memstream);
 		rank_c = 0;
 		for (ui32 i = 0; i < session_c; ++i) {
@@ -77,13 +77,10 @@ void click_log_predict_rankings() {
 		for (ui32 i = 0; i < session_c; ++i) {
 			highest_rank = 1;
 			ui16 ranking_buff_c = 0;
-			for (ui16 j = 0; j < 500; ++j) masked_ranks[j] = false;
+			for (ui16 j = 0; j < MAX_RANK; ++j) masked_ranks[j] = false;
 			masked_docs.clear();
 			safe_read(&sid, sizeof(ui32), memstream);
-			fprintf(stderr, "============\n");
-			fprintf(stderr, "SID: %u\n", sid);
 			safe_read(&duplicates, sizeof(ui32), memstream);
-			fprintf(stderr, "\tDUPLICATES: %u\n", duplicates);
 			fwrite(&duplicates, sizeof(ui32), 1, stdout);
 			safe_read(&click_c, sizeof(ui16), memstream);
 			fwrite(&click_c, sizeof(ui16), 1, stdout);
@@ -135,9 +132,13 @@ void click_log_predict_rankings() {
 				compare_ui32_tuple
 			);
 			ui16 last_rank = 0;
+if (qid == 78 && click_c == 16)
+	fprintf(stderr, "ranking_buff_c: %u\n", ranking_buff_c);
 			for (ui16 j = 0; j < ranking_buff_c; ++j) {
 				UI32Tuple item = ranking_buff[j];
 				ui16 rank = item.first;
+if (qid == 78 && click_c == 16)
+fprintf(stderr, "-->rank: %u = %u\n", rank, item.second);
 				while (++last_rank != rank) {
 					std::unordered_map<ui32, ui32> map =
 						rank_doc_mass_map[last_rank - 1];
@@ -150,14 +151,16 @@ void click_log_predict_rankings() {
 								{it->second, it->first};
 						}
 					if (total == 0) {
-						fprintf(stderr, "[OPTIONS: 1] 0 (1)");
 						total = 1; ui32 doc = 0;
 						fwrite(&total, sizeof(ui32), 1, stdout);
 						fwrite(&doc, sizeof(ui32), 1, stdout);
 						fwrite(&total, sizeof(ui32), 1, stdout);
 					} else {
-						fprintf(stderr, "[OPTIONS: %u] ", total);
 						fwrite(&total, sizeof(ui32), 1, stdout);
+if (qid == 78 && click_c == 16) {
+	fprintf(stderr, "total: %u\n", total);
+	fprintf(stderr, "rank: %u\n", last_rank);
+}
 						qsort(
 							schrodinger_buff,
 							schrodinger_buff_c,
@@ -171,20 +174,19 @@ void click_log_predict_rankings() {
 							) {
 								ui32 prop = schrodinger_buff[k].first;
 								ui32 doc = schrodinger_buff[k].second;
-								fprintf(stderr, "%u (%u) ", doc, prop);
 								fwrite(&doc, sizeof(ui32), 1, stdout);
 								fwrite(&prop, sizeof(ui32), 1, stdout);
 							}
 						}
 					}
-					fprintf(stderr, "\n");
 				}
 				ui32 total = 1;
 				fwrite(&total, sizeof(ui32), 1, stdout);
 				fwrite(&item.second, sizeof(ui32), 1, stdout);
 				fwrite(&total, sizeof(ui32), 1, stdout);
-				fprintf(stderr, "[OPTIONS: 1] %u (1)\n", item.second);
-				fflush(stderr);
+if (qid == 78 && click_c == 16) {
+	fprintf(stderr, "doc: %u rank: %u\n", item.second, last_rank);
+}
 			}
 		}
 	}
