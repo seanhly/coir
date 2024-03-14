@@ -24,6 +24,15 @@ qid CURRENT_QUERY;
 #include "help.c"
 #include "gc.c"
 #include "debug.c"
+#include "subcommands/convert_click_log.c"
+#include "subcommands/read_sparse_click_log.c"
+#include "subcommands/read_dense_click_log.c"
+#include "subcommands/click_log_probable_rank_docs.cpp"
+#include "subcommands/click_log_predict_rankings.cpp"
+#include "subcommands/pscm.cpp"
+#include "subcommands/read_config.c"
+#include "subcommands/read_relevancy_file.c"
+#include "subcommands/convert_dense_click_log.c"
 
 std::unordered_map<ui64, Context> CANDIDATES;
 
@@ -749,7 +758,9 @@ void show_candidates(f64 quality_threshold) {
 		if (!doc_from_daemon(doc)) err_exit("error reading doc\n");
 		f64 relevance = relevance_from_daemon();
 		get_orig_doc_id(doc);
-		printf(i == 0 ? "%s\t" : "\t%s\t", get_focus_buffer(), relevance);
+		if (i == 0) printf("%s", get_focus_buffer());
+		else printf("\t%s", get_focus_buffer());
+		printf("\t");
 		compact_print_float(relevance, 20);
 	}
 	printf("\n");
@@ -760,7 +771,8 @@ void show_candidates(f64 quality_threshold) {
 			docid doc;
 			if (!doc_from_daemon(doc)) err_exit("error reading doc\n");
 			get_orig_doc_id(doc);
-			printf(i == 0 ? "%s\t" : "\t%s\t", get_focus_buffer());
+			if (i == 0) printf("%s", get_focus_buffer());
+			else printf("\t%s", get_focus_buffer());
 		}
 		printf("\n");
 		one_result_found = true;
@@ -832,6 +844,23 @@ int main(int argc, char *argv[]) {
 	else if (strcmp(*argv, "candidates") == 0) subcommand = SHOW_CANDIDATES;
 	else if (strcmp(*argv, "daemon") == 0) subcommand = DAEMON;
 	else if (strcmp(*argv, "experiment") == 0) subcommand = EXPERIMENT;
+	else if (strcmp(*argv, "convert-click-log") == 0)
+		subcommand = CONVERT_CLICK_LOG;
+	else if (strcmp(*argv, "convert-dense-click-log") == 0)
+		subcommand = CONVERT_DENSE_CLICK_LOG;
+	else if (strcmp(*argv, "read-sparse-click-log") == 0)
+		subcommand = READ_SPARSE_CLICK_LOG;
+	else if (strcmp(*argv, "read-dense-click-log") == 0)
+		subcommand = READ_DENSE_CLICK_LOG;
+	else if (strcmp(*argv, "click-log-probable-rank-docs") == 0)
+		subcommand = CLICK_LOG_PROBABLE_RANK_DOCS;
+	else if (strcmp(*argv, "click-log-predict-rankings") == 0)
+		subcommand = CLICK_LOG_PREDICT_RANKINGS;
+	else if (strcmp(*argv, "pscm") == 0)
+		subcommand = PARTIALLY_SEQUENTIAL_CLICK_MODEL;
+	else if (strcmp(*argv, "read-config") == 0) subcommand = READ_CONFIG;
+	else if (strcmp(*argv, "read-rel-file") == 0)
+		subcommand = READ_RELEVANCY_FILE;
 	else {
 		argv--;
 		argc++;
@@ -855,7 +884,49 @@ int main(int argc, char *argv[]) {
 			if (!extra_args && input_pipe_open) print_data_help_then_halt();
 			print_general_help_then_halt();
 			break;
-		case RERANK:
+		case CONVERT_DENSE_CLICK_LOG: {
+			if (!extra_args || input_pipe_open)
+				print_subcommand_help_then_halt(CONVERT_DENSE_CLICK_LOG, 1);
+			char *click_log_path = *argv;
+			argv++;
+			argc--;
+			char *rankings_path = *argv;
+			argv++;
+			argc--;
+			convert_dense_click_log(click_log_path, rankings_path);
+			break;
+		} case READ_CONFIG:
+			if (extra_args || input_pipe_open)
+				print_subcommand_help_then_halt(READ_CONFIG, 1);
+			read_config();
+			break;
+		case CONVERT_CLICK_LOG:
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(CONVERT_CLICK_LOG, 1);
+			convert_click_log();
+			break;
+		case READ_SPARSE_CLICK_LOG:
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(READ_SPARSE_CLICK_LOG, 1);
+			read_sparse_click_log();
+			break;
+		case READ_DENSE_CLICK_LOG:
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(READ_DENSE_CLICK_LOG, 1);
+			read_dense_click_log();
+			break;
+		case CLICK_LOG_PROBABLE_RANK_DOCS:
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(
+					CLICK_LOG_PROBABLE_RANK_DOCS, 1);
+			click_log_probable_rank_docs();
+			break;
+		case CLICK_LOG_PREDICT_RANKINGS: {
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(CLICK_LOG_PREDICT_RANKINGS, 1);
+			click_log_predict_rankings();
+			break;
+		} case RERANK:
 			if (!input_pipe_open)
 				print_subcommand_help_then_halt(RERANK, 1);
 			method = rerank_method_from_argv(argc, &argv);
@@ -914,7 +985,18 @@ int main(int argc, char *argv[]) {
 				fairco_experiment(repetitions);
 			}
 			break;
+		case PARTIALLY_SEQUENTIAL_CLICK_MODEL:
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(
+					PARTIALLY_SEQUENTIAL_CLICK_MODEL, 1);
+			partially_sequential_click_model();
+			break;
+		case READ_RELEVANCY_FILE:
+			if (extra_args || !input_pipe_open)
+				print_subcommand_help_then_halt(READ_RELEVANCY_FILE, 1);
+			read_relevancy_file();
+			break;
 		case BAD_SUBCOMMAND:
-	   	 print_general_help_then_halt();
+			print_general_help_then_halt();
 	}
 }

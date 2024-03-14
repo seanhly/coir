@@ -1,10 +1,28 @@
+#ifndef CONFIG_C
+#define CONFIG_C
+
 #include <string.h>
+
+typedef struct {
+	percentage CM_confidence;
+	ui8 logging_level;
+} Configuration;
+
+const Configuration DEFAULT_CONFIG = {
+	.CM_confidence = 95
+};
+
+#include "config_parser.c"
 
 char *CACHE_DIR_PATH = NULL;
 char *JOB_DIR_PATH = NULL;
 char *JOB_QUEUE_PATH = NULL;
 char *QREL_DIR = NULL;
 char *DOC_ID_DIR_PATH = NULL;
+char *CONFIG_DIR_PATH = NULL;
+char *CONFIG_FILE_PATH = NULL;
+Configuration CONFIGURATION;
+bool CONFIG_INITIALIZED = false;
 
 char *cache_dir_path() {
 	if (CACHE_DIR_PATH != NULL)
@@ -15,9 +33,58 @@ char *cache_dir_path() {
 	strcat(CACHE_DIR_PATH, "/.cache/");
 	struct stat st = {0};
 	if (stat(CACHE_DIR_PATH, &st) == -1) mkdir(CACHE_DIR_PATH, 0700);
-	strcat(CACHE_DIR_PATH, "lrr/");
+	strcat(CACHE_DIR_PATH, "coir/");
 	if (stat(CACHE_DIR_PATH, &st) == -1) mkdir(CACHE_DIR_PATH, 0700);
 	return CACHE_DIR_PATH;
+}
+
+char *config_dir_path() {
+	if (CONFIG_DIR_PATH == NULL) {
+		char *config_home = getenv("XDG_CONFIG_HOME");
+		if (config_home == NULL) {
+			char *home = getenv("HOME");
+			config_home = (char*) malloc(strlen(home) + 14);
+			strcpy(config_home, home);
+			strcat(config_home, "/.config/");
+		}
+		CONFIG_DIR_PATH = config_home;
+	}
+	return CONFIG_DIR_PATH;
+}
+
+char *config_file_path() {
+	if (CONFIG_FILE_PATH == NULL) {
+		char *config_dir = config_dir_path();
+		struct stat st = {0};
+		if (stat(config_dir, &st) == -1)
+			mkdir(config_dir, 0700);
+		// Add "/coir.ini" to config dir.
+		char *config_file = (char*) malloc(strlen(config_dir) + 10);
+		strcpy(config_file, config_dir);
+		strcat(config_file, "coir.ini");
+		CONFIG_FILE_PATH = config_file;
+	}
+	return CONFIG_FILE_PATH;
+}
+
+Configuration config() {
+	if (!CONFIG_INITIALIZED) {
+		// Check if file exists
+		struct stat st;
+		if (stat(config_file_path(), &st) == -1) {
+			FILE *config_file = safe_file_write(config_file_path());
+			fprintf(config_file, "[click-models]\n");
+			fprintf(config_file, "confidence = 0.95\n");
+			fprintf(config_file, "\n");
+			fprintf(config_file, "[logging]\n");
+			fprintf(config_file, "level = 0\n");
+			fclose(config_file);
+		}
+		FILE *config_file = safe_file_read(config_file_path());
+		CONFIGURATION = parse_config_file(config_file);
+		CONFIG_INITIALIZED = true;
+	}
+	return CONFIGURATION;
 }
 
 char *job_start_dir() {
@@ -69,3 +136,4 @@ char *job_queue() {
 	return JOB_QUEUE_PATH;
 }
 
+#endif

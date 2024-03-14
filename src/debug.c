@@ -2,10 +2,6 @@ void a() {
 	printf("Checkpoint: A\n");
 }
 
-void b() {
-	printf("Checkpoint: B\n");
-}
-
 void c() {
 	printf("Checkpoint: C\n");
 }

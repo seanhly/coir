@@ -9,6 +9,11 @@
 
 #define FAIRCO_LAMBDA 0.01 //.50
 
+#define CONCRETE_RANK_DATA      0b00000001
+#define PROBABILISTIC_RANK_DATA 0b00000000
+
 const char* GREEN =  "\033[0;32m";
 const char* RED = "\033[0;31m";
 const char* RESET = "\033[0m";
+
+#define MAX_RANK 4000

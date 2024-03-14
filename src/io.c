@@ -212,4 +212,11 @@ f64 exposure_from_qrel() {
 	return exposure;
 }
 
+void safe_read(void *ptr, size_t size, FILE *stream) {
+	if (fread(ptr, size, 1, stream) != 1) {
+		fprintf(stderr, "Error reading from file\n");
+		exit(1);
+	}
+}
+
 #endif

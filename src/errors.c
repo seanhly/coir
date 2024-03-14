@@ -1,3 +1,6 @@
+#ifndef ERRORS_C
+#define ERRORS_C
+
 void err_exit(const char *msg) {
 	printf("%s\n", msg);
 	exit(EXIT_FAILURE);
@@ -39,3 +42,5 @@ void error_reading_group() {
 void duplicate_doc_id_err() {
     err_exit("duplicate doc_id");
 }
+
+#endif

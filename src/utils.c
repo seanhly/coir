@@ -8,6 +8,8 @@
 #include "fp.c"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define ABS(a) ((a) < 0 ? -(a) : (a))
 
 PathBuffer ID_STR_MAP_PATH = {0, 0};
 Candidate *DOC_RELEVANCE_UPDATE_BUFFER = NULL;
