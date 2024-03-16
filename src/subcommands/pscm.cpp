@@ -4,13 +4,14 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <math.h>
+#include <stdint.h>
 #include "../stats.c"
+#include <vector>
+#include <pthread.h>
 
-typedef struct {
-	ui32 total_mass;
-	UI32Tuple *options;
-	ui32 options_c;
-} RankedOption;
+template<typename T> using A = std::vector<T>;
+
+const ui32 CLICK_FLAG = (ui32) 0xFFFFFFFF;
 
 typedef struct ViewBetweenClicksStruct {
 	ui16 before;
@@ -40,33 +41,35 @@ struct ViewBetweenClicksHash {
 
 typedef struct QueryDocPairStruct {
 	ui32 qid;
-	ui32 doc;
+	ui32 d;
 
 	bool operator==(const QueryDocPairStruct& other) const {
-		return qid == other.qid && doc == other.doc;
+		return qid == other.qid && d == other.d;
 	}
 } QueryDocPair;
 
 typedef struct QueryDocPairHash {
 	std::size_t operator()(const QueryDocPair& k) const {
-		return (((ui64) k.qid) << 32) | k.doc;
+		return (((ui64) k.qid) << 32) | k.d;
 	}
 } QueryDocPairHash;
 
 typedef struct {
 	probability relevance;
 	ui32 clicks;
-} QueryDocMetric;
+	f64 *rel_numerator;
+	f64 *rel_denominator;
+} QueryDocMetrics;
 
 typedef struct {
 	ui32 qid;
-	ui32 doc;
+	ui32 d;
 	probability relevance;
 	ui32 clicks;
 } QueryDocResult;
 
 typedef struct {
-	ui32 doc;
+	ui32 d;
 	probability relevance;
 } DocumentRelevance;
 
@@ -75,6 +78,59 @@ typedef struct {
 	f64 denominator;
 } Fraction;
 
+typedef struct {
+	f32 p;
+	ui32 d;
+	QueryDocMetrics *doc_metrics;
+} TrainingRankOption;
+
+typedef struct {
+	TrainingRankOption* options;
+	TrainingRankOption* after_options;
+} TrainingFuzzyRank;
+
+typedef struct {
+	ui32 click_flag;
+	ui32 d;
+	QueryDocMetrics *doc_metrics;
+} TrainingKnownRank;
+
+typedef union {
+	TrainingFuzzyRank rank;
+	TrainingKnownRank click;
+} TrainingPoint;
+
+typedef struct {
+	probability view_p;
+	f64 *view_numerator;
+	f64 *view_denominator;
+} ViewMetrics;
+
+typedef struct {
+	ui16 rank;
+	ViewMetrics *view_metrics;
+} TrainingClick;
+
+typedef struct {
+	ui32 dupes;
+	TrainingClick* clicks;
+	TrainingClick* after_clicks;
+	TrainingPoint* points;
+	TrainingPoint* after_points;
+} TrainingSession;
+
+typedef struct {
+	ui32 qid;
+	TrainingSession *sessions;
+	TrainingSession *after_sessions;
+} Training;
+
+typedef struct {
+	A<Training> training_data;
+	ui64 thread_i;
+	bool is_probabilistic;
+} TrainingMaterial;
+
 int compare_query_doc_result(const void *a, const void *b) {
 	QueryDocResult *a_r = (QueryDocResult*) a;
 	QueryDocResult *b_r = (QueryDocResult*) b;
@@ -82,8 +138,8 @@ int compare_query_doc_result(const void *a, const void *b) {
 	if (a_r->qid > b_r->qid) return +1;
 	if (a_r->relevance < b_r->relevance) return +1;
 	if (a_r->relevance > b_r->relevance) return -1;
-	if (a_r->doc < b_r->doc) return -1;
-	if (a_r->doc > b_r->doc) return +1;
+	if (a_r->d < b_r->d) return -1;
+	if (a_r->d > b_r->d) return +1;
 	return 0;
 }
 
@@ -101,6 +157,114 @@ int compare_view_prob(const void *a, const void *b) {
 	return 0;
 }
 
+void *process_training_data_chunk(void *training_material) {
+	ui16 rank;
+	TrainingMaterial *m = (TrainingMaterial*) training_material;
+	A<Training> training_data = m->training_data;
+	bool is_probabilistic = m->is_probabilistic;
+	ui64 chunk_size = training_data.size() / THREADS;
+	ui64 start = m->thread_i * chunk_size;
+	ui64 end;
+	if (m->thread_i == THREADS - 1) end = training_data.size();
+	else end = start + chunk_size;
+	for (ui64 i = start; i < end; ++i) {
+		Training dat = training_data[i];
+		ui32 qid = dat.qid;
+		for (TrainingSession *s = dat.sessions; s < dat.after_sessions; ++s) {
+			ui32 dupes = s->dupes;
+			ui16 max_rank = 0;
+			ui16 prev_rank = 0;
+			for (TrainingClick *click_ptr = s->clicks; click_ptr < s->after_clicks; ++click_ptr) {
+				rank = click_ptr->rank;
+				ViewMetrics *view_metrics = click_ptr->view_metrics;
+				ui32 d;
+				ui16 incr = prev_rank < rank ? 1 : -1;
+				ui16 k = prev_rank == 0 ? 1 : prev_rank;
+				for (; k != rank; k += incr, ++view_metrics) {
+					TrainingPoint point = s->points[k - 1];
+					const probability seen = view_metrics->view_p;
+					const probability not_seen = 1 - seen;
+					if (is_probabilistic && point.click.click_flag != CLICK_FLAG) {
+						for (TrainingRankOption *o = point.rank.options; o < point.rank.after_options; ++o) {
+							QueryDocMetrics *metrics = o->doc_metrics;
+							probability rel = metrics->relevance;
+							probability unclicked = 1 - (seen * rel);
+							probability missed = not_seen * rel;
+							// A1
+							probability unclicked_since_not_rel =
+								(1 - rel) / unclicked;
+							metrics->rel_denominator[m->thread_i] +=
+								unclicked_since_not_rel * dupes * o->p;
+							// A2
+							probability unclicked_since_missed =
+								missed / unclicked;
+							metrics->rel_numerator[m->thread_i] +=
+								unclicked_since_missed * dupes * o->p;
+							metrics->rel_denominator[m->thread_i] +=
+								unclicked_since_missed * dupes * o->p;
+							// G1
+							probability unclicked_since_not_seen =
+								not_seen / unclicked;
+							// G2
+							probability unclicked_since_seen_and_irrelevant
+								= (seen * (1 - rel)) / unclicked;
+							view_metrics->view_numerator[m->thread_i] +=
+								unclicked_since_seen_and_irrelevant
+								* dupes * o->p;
+							view_metrics->view_denominator[m->thread_i] +=
+								unclicked_since_seen_and_irrelevant
+								* dupes * o->p;
+							view_metrics->view_denominator[m->thread_i] +=
+								unclicked_since_not_seen * dupes * o->p;
+						}
+					} else {
+						d = point.click.d;
+						QueryDocMetrics *metrics = point.click.doc_metrics;
+						probability rel = metrics->relevance;
+						probability unclicked = 1 - (seen * rel);
+						probability missed = not_seen * rel;
+						// A1
+						probability unclicked_since_not_rel =
+							(1 - rel) / unclicked;
+						metrics->rel_denominator[m->thread_i] +=
+							unclicked_since_not_rel * dupes;
+						// A2
+						probability unclicked_since_missed =
+							missed / unclicked;
+						metrics->rel_numerator[m->thread_i] +=
+							unclicked_since_missed * dupes;
+						metrics->rel_denominator[m->thread_i] +=
+							unclicked_since_missed * dupes;
+						// G1
+						probability unclicked_since_not_seen =
+							not_seen / unclicked;
+						// G2
+						probability unclicked_since_seen_and_irrelevant =
+							(seen * (1 - rel)) / unclicked;
+						view_metrics->view_numerator[m->thread_i] +=
+							unclicked_since_seen_and_irrelevant * dupes;
+						view_metrics->view_denominator[m->thread_i] +=
+							unclicked_since_seen_and_irrelevant * dupes;
+						view_metrics->view_denominator[m->thread_i] +=
+							unclicked_since_not_seen * dupes;
+					}
+				}
+				d = s->points[rank - 1].click.d;
+				QueryDocMetrics *metrics =
+					s->points[rank - 1].click.doc_metrics;
+				// A3
+				metrics->rel_numerator[m->thread_i] += dupes;
+				metrics->rel_denominator[m->thread_i] += dupes;
+				// G3
+				view_metrics->view_numerator[m->thread_i] += dupes;
+				view_metrics->view_denominator[m->thread_i] += dupes;
+				prev_rank = rank;
+			}
+		}
+	}
+	return NULL;
+}
+
 /**
  * Implementation of the click model described in:
  * Wang, C., Liu, Y., Wang, M., Zhou, K., Nie, J., & Ma, S. (2015).
@@ -109,311 +273,273 @@ int compare_view_prob(const void *a, const void *b) {
 void partially_sequential_click_model() {
 	ui8 file_opts;
 	safe_read(&file_opts, sizeof(ui8), stdin);
+	const f64 z = z_score(config().CM_confidence);
 	const bool is_probabilistic = file_opts == PROBABILISTIC_RANK_DATA;
 	ui32 qid;
 	ui32 session_c;
-	ui32 duplicates;
+	ui32 dupes;
 	ui16 click_c;
 	ui16 rank;
-	ui32 doc;
+	ui32 d;
 	ui32 buff_size = 2000000000;
 	char *buffer = (char*) malloc(buff_size);
 	FILE *memstream = fmemopen(buffer, buff_size, "rb+");
-	std::unordered_map<QueryDocPair, QueryDocMetric, QueryDocPairHash>
+	std::unordered_map<QueryDocPair, QueryDocMetrics, QueryDocPairHash>
 		rel_map;
-	std::unordered_map<
-		ViewBetweenClicks, probability, ViewBetweenClicksHash
-			> view_prob_map;
-	std::unordered_map<QueryDocPair, Fraction, QueryDocPairHash>
-		relevance_fractions;
-	std::unordered_map<ViewBetweenClicks, Fraction,
-		ViewBetweenClicksHash> view_prob_fractions;
+	std::unordered_map<ViewBetweenClicks, ViewMetrics*, ViewBetweenClicksHash>
+		view_map;
 	ui64 qid_c = 0;
 	bool *rank_clicked = (bool*) malloc(sizeof(bool) * MAX_RANK);
 	for (ui32 i = 0; i < MAX_RANK; ++i) rank_clicked[i] = false;
+	A<Training> training_data;
+	A<TrainingSession> training_sessions;
+	A<TrainingClick> training_data_clicks;
+	A<TrainingPoint> training_points;
+	A<TrainingRankOption> training_data_rank_options;
+	A<ViewMetrics> training_view_metrics;
+	training_data.reserve(13279574);
+	training_sessions.reserve(21633169);
+	training_data_clicks.reserve(46296250);
+	training_points.reserve(98308810);
+	training_data_rank_options.reserve(98308810);
+	training_view_metrics.reserve(98308810);
+	f64 *numens_and_denoms = (f64*) malloc(sizeof(f64) * THREADS * 2 * 98308810);
+	ui64 numens_and_denoms_c = 0;
 	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
-		//fprintf(stderr, "QID: %u\n", qid);
-		fwrite(&qid, sizeof(ui32), 1, memstream);
 		safe_read(&session_c, sizeof(ui32), stdin);
-		fwrite(&session_c, sizeof(ui32), 1, memstream);
-		//fprintf(stderr, "SESSION_C: %u\n", session_c);
+		Training data = {
+			qid,
+			training_sessions.data() + training_sessions.size(),
+			NULL
+		};
 		for (ui32 i = 0; i < session_c; ++i) {
-			safe_read(&duplicates, sizeof(ui32), stdin);
-			//fprintf(stderr, "\tDUPLICATES: %u\n", duplicates);
-			fwrite(&duplicates, sizeof(ui32), 1, memstream);
+			safe_read(&dupes, sizeof(ui32), stdin);
 			safe_read(&click_c, sizeof(ui16), stdin);
-			//fprintf(stderr, "\tCLICK_C: %u\n", click_c);
-			fwrite(&click_c, sizeof(ui16), 1, memstream);
-			ui16 prev_rank = 0;
+			TrainingSession session = {
+				dupes,
+				training_data_clicks.data() + training_data_clicks.size(),
+				NULL,
+				training_points.data() + training_points.size(),
+				NULL
+			};
+			TrainingClick *prev_click = NULL;
 			ui16 max_rank = 0;
 			for (ui32 j = 0; j < click_c; ++j) {
 				if (j == 0) {
 					safe_read(&rank, sizeof(ui16), stdin);
-					//fprintf(stderr, "\t\tFIRST RANK: %u\n", rank);
 				} else {
-					i8 gap;
-					safe_read(&gap, sizeof(i8), stdin);
-					//fprintf(stderr, "\t\tGAP: %d\n", gap);
-					rank = prev_rank + gap;
+					i8 hop;
+					safe_read(&hop, sizeof(i8), stdin);
+					rank = prev_click->rank + hop;
 				}
 				rank_clicked[rank - 1] = true;
-				fwrite(&rank, sizeof(ui16), 1, memstream);
 				if (rank > max_rank) max_rank = rank;
-				ui16 incr = prev_rank < rank ? 1 : -1;
-				for (
-					ui16 k = prev_rank == 0 ? 1 : prev_rank;
-					k != rank;
-					k += incr
-				) {
-					view_prob_map[ViewBetweenClicks{prev_rank, k, rank}] = 0.5;
-					view_prob_fractions[ViewBetweenClicks{prev_rank, k, rank}]
-						= {0, 0};
+				i16 incr;
+				ui16 k;
+				ui16 prev_rank;
+				if (prev_click == NULL) {
+					k = 1;
+					prev_rank = 0;
+					incr = 1;
+				} else {
+					k = prev_click->rank;
+					prev_rank = prev_click->rank;
+					incr = prev_rank <= rank ? 1 : -1;
 				}
-				prev_rank = rank;
+				ViewMetrics *metrics;
+				if (view_map.find({prev_rank, k, rank}) == view_map.end()) {
+					metrics = training_view_metrics.data() + training_view_metrics.size();
+					view_map[ViewBetweenClicks{prev_rank, k, rank}] = metrics;
+					for (; k != rank + incr; k += incr) {
+						ViewMetrics metric;
+						metric.view_p = 0.5;
+						metric.view_numerator = numens_and_denoms + numens_and_denoms_c;
+						for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+							numens_and_denoms[numens_and_denoms_c++] = 0;
+						metric.view_denominator = numens_and_denoms + numens_and_denoms_c;
+						for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+							numens_and_denoms[numens_and_denoms_c++] = 0;
+						training_view_metrics.push_back(metric);
+					}
+				} else metrics = view_map[{prev_rank, k, rank}];
+				TrainingClick click = {rank, metrics};
+				training_data_clicks.push_back(click);
+				prev_click = &training_data_clicks[training_data_clicks.size() - 1];
 			}
+			session.after_clicks =
+				training_data_clicks.data() + training_data_clicks.size();
 			for (ui16 rank = 1; rank <= max_rank; ++rank) {
 				if (is_probabilistic) {
 					ui32 total;
 					safe_read(&total, sizeof(ui32), stdin);
-					fwrite(&total, sizeof(ui32), 1, memstream);
 					ui32 prop;
 					if (rank_clicked[rank - 1]) {
 						rank_clicked[rank - 1] = false;
-						// When a rank is clicked, its doc
-						// must be known (no loop).
-						ui32 doc;
-						safe_read(&doc, sizeof(ui32), stdin);
-						if (rel_map.find({qid, doc}) == rel_map.end()) {
-							rel_map[{qid, doc}].relevance = 0.5;
-							rel_map[{qid, doc}].clicks = 1;
-						} else rel_map[{qid, doc}].clicks += 1;
-						relevance_fractions[{qid, doc}] = {0, 0};
-						fwrite(&doc, sizeof(ui32), 1, memstream);
+						ui32 d;
+						safe_read(&d, sizeof(ui32), stdin);
 						safe_read(&prop, sizeof(ui32), stdin);
-						fwrite(&prop, sizeof(ui32), 1, memstream);
-					} else {
-						for (ui64 k = 0; k < total; k += prop) {
-							ui32 doc;
-							safe_read(&doc, sizeof(ui32), stdin);
-							if (rel_map.find({qid, doc}) == rel_map.end()) {
-								rel_map[{qid, doc}].relevance = 0.5;
-								rel_map[{qid, doc}].clicks = 0;
-							}
-							relevance_fractions[{qid, doc}] = {0, 0};
-							fwrite(&doc, sizeof(ui32), 1, memstream);
-							safe_read(&prop, sizeof(ui32), stdin);
-							fwrite(&prop, sizeof(ui32), 1, memstream);
+						if (rel_map.find({qid, d}) == rel_map.end()) {
+							rel_map[{qid, d}].relevance = 0.5;
+							rel_map[{qid, d}].clicks = 1;
+							rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
+							rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
 						}
+						else rel_map[{qid, d}].clicks += 1;
+						TrainingPoint point;
+						QueryDocMetrics *metrics = &rel_map[{qid, d}];
+						point.click = {CLICK_FLAG, d, metrics};
+						training_points.push_back(point);
+					} else {
+						TrainingPoint point;
+						point.rank.options =
+							training_data_rank_options.data() +
+								training_data_rank_options.size();
+						for (ui64 k = 0; k < total; k += prop) {
+							ui32 d;
+							safe_read(&d, sizeof(ui32), stdin);
+							if (rel_map.find({qid, d}) == rel_map.end()) {
+								rel_map[{qid, d}].relevance = 0.5;
+								rel_map[{qid, d}].clicks = 0;
+								rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
+								for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+									numens_and_denoms[numens_and_denoms_c++] = 0;
+								rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
+								for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+									numens_and_denoms[numens_and_denoms_c++] = 0;
+							}
+							safe_read(&prop, sizeof(ui32), stdin);
+							QueryDocMetrics *metrics = &rel_map[{qid, d}];
+							training_data_rank_options.push_back({
+								(f32) prop / (f32) total, d, metrics
+							});
+						}
+						point.rank.after_options =
+							training_data_rank_options.data() +
+								training_data_rank_options.size();
+						training_points.push_back(point);
 					}
 				} else {
-					ui32 doc;
-					safe_read(&doc, sizeof(ui32), stdin);
+					ui32 d;
+					safe_read(&d, sizeof(ui32), stdin);
 					if (rank_clicked[rank - 1]) {
 						rank_clicked[rank - 1] = false;
-						if (rel_map.find({qid, doc}) == rel_map.end()) {
-							rel_map[{qid, doc}].relevance = 0.5;
-							rel_map[{qid, doc}].clicks = 1;
-						} else rel_map[{qid, doc}].clicks += 1;
+						if (rel_map.find({qid, d}) == rel_map.end()) {
+							rel_map[{qid, d}].relevance = 0.5;
+							rel_map[{qid, d}].clicks = 1;
+							rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
+							rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
+						} else rel_map[{qid, d}].clicks += 1;
+						QueryDocMetrics *metrics = &rel_map[{qid, d}];
+						TrainingPoint point;
+						point.click = {CLICK_FLAG, d, metrics};
+						training_points.push_back(point);
 					} else {
-						if (rel_map.find({qid, doc}) == rel_map.end()) {
-							rel_map[{qid, doc}].relevance = 0.5;
-							rel_map[{qid, doc}].clicks = 0;
+						if (rel_map.find({qid, d}) == rel_map.end()) {
+							rel_map[{qid, d}].relevance = 0.5;
+							rel_map[{qid, d}].clicks = 0;
+							rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
+							rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
 						}
+						TrainingPoint point;
+						QueryDocMetrics *metrics = &rel_map[{qid, d}];
+						point.click = {CLICK_FLAG, d, metrics};
+						training_points.push_back(point);
 					}
-					relevance_fractions[{qid, doc}] = {0, 0};
-					fwrite(&doc, sizeof(ui32), 1, memstream);
 				}
 			}
+			session.after_points =
+				training_points.data() + training_points.size();
+			training_sessions.push_back(session);
 		}
+		data.after_sessions =
+			training_sessions.data() + training_sessions.size();
+		training_data.push_back(data);
 		qid_c++;
 	}
-	UI32Tuple *click_buff = (UI32Tuple*) malloc(sizeof(UI32Tuple) * 500);
-	i16 click_buff_c;
-	RankedOption* opt_buff =
-		(RankedOption*) malloc(sizeof(RankedOption) * MAX_RANK);
-	for (ui32 i = 0; i < MAX_RANK; ++i) {
-		opt_buff[i].options_c = 0;
-		opt_buff[i].options = (UI32Tuple*) malloc(sizeof(UI32Tuple) * 100000);
-	}
-	for (ui64 round = 0; round < 2; ++round) {
+	pthread_t threads[THREADS];
+	TrainingMaterial training_materials[THREADS];
+	i32 rc;
+	for (ui64 round = 0; round < 1000; ++round) {
 		fprintf(stderr, "EM ROUND: %lu\n", round);
-		rewind(memstream);
-		ui32 opt_buff_c = 0;
-		for (ui64 qid_i = 0; qid_i < qid_c; ++qid_i) {
-			safe_read(&qid, sizeof(ui32), memstream);
-			safe_read(&session_c, sizeof(ui32), memstream);
-			for (ui32 i = 0; i < session_c; ++i) {
-				safe_read(&duplicates, sizeof(ui32), memstream);
-				safe_read(&click_c, sizeof(ui16), memstream);
-				click_buff_c = 0;
-				ui16 max_rank = 0;
-				for (; click_buff_c < click_c; ++click_buff_c) {
-					safe_read(&rank, sizeof(ui16), memstream);
-					click_buff[click_buff_c].first = rank;
-					if (rank > max_rank) max_rank = rank;
-				}
-				opt_buff_c = 0;
-				for (ui16 rank = 1; rank <= max_rank; ++rank) {
-					ui32 total_mass;
-					if (is_probabilistic)
-						safe_read(&total_mass, sizeof(ui32), memstream);
-					else total_mass = 1;
-					opt_buff[opt_buff_c].total_mass = total_mass;
-					opt_buff[opt_buff_c].options_c = 0;
-					if (is_probabilistic) {
-						ui32 prop;
-						for (ui64 k = 0; k < total_mass; k += prop) {
-							ui32 doc;
-							safe_read(&doc, sizeof(ui32), memstream);
-							safe_read(&prop, sizeof(ui32), memstream);
-							ui32 options_c = opt_buff[opt_buff_c].options_c;
-							opt_buff[opt_buff_c].options[options_c].first = doc;
-							opt_buff[opt_buff_c].options[options_c].second = prop;
-							opt_buff[opt_buff_c].options_c++;
-						}
-					} else {
-						ui32 doc;
-						safe_read(&doc, sizeof(ui32), memstream);
-						ui32 options_c = opt_buff[opt_buff_c].options_c;
-						opt_buff[opt_buff_c].options[options_c].first = doc;
-						opt_buff[opt_buff_c].options_c++;
-					}
-					++opt_buff_c;
-				}
-				while (--click_buff_c >= 0)
-					click_buff[click_buff_c].second = opt_buff[
-						click_buff[click_buff_c].first - 1].options[0].first;
-				ui16 prev_rank = 0;
-				for (ui32 j = 0; j < click_c; ++j) {
-					rank = click_buff[j].first;
-					ui32 doc;
-					ui16 incr = prev_rank < rank ? 1 : -1;
-					for (
-						ui16 k = prev_rank == 0 ? 1 : prev_rank;
-						k != rank;
-						k += incr
-					) {
-						ViewBetweenClicks key = {prev_rank, k, rank};
-						const probability seen = view_prob_map[key];
-						const probability not_seen = 1 - seen;
-						if (is_probabilistic) {
-							ui32 total_mass = opt_buff[k - 1].total_mass;
-							for (ui16 l = 0; l < opt_buff[k - 1].options_c; ++l) {
-								doc = opt_buff[k - 1].options[l].first;
-								ui32 mass = opt_buff[k - 1].options[l].second;
-								probability p = (double) mass / total_mass;
-								probability rel = rel_map[{qid, doc}].relevance;
-								probability no_click = 1 - (seen * rel);
-								probability missed = not_seen * rel;
-								// A1
-								probability no_click_since_not_rel =
-									(1 - rel) / no_click;
-								relevance_fractions[{qid, doc}].denominator +=
-									no_click_since_not_rel * duplicates * p;
-								// A2
-								probability no_click_since_missed =
-									missed / no_click;
-								Fraction *fraction =
-									&relevance_fractions[{qid, doc}];
-								fraction->numerator +=
-									no_click_since_missed * duplicates * p;
-								fraction->denominator +=
-									no_click_since_missed * duplicates * p;
-								// G1
-								probability no_click_since_not_seen =
-									not_seen / no_click;
-								// G2
-								probability no_click_since_seen_and_irrelevant =
-									(seen * (1 - rel)) / no_click;
-								fraction = &view_prob_fractions[key];
-								fraction->numerator +=
-									no_click_since_seen_and_irrelevant
-									* duplicates * p;
-								fraction->denominator +=
-									no_click_since_seen_and_irrelevant
-									* duplicates * p;
-								fraction->denominator +=
-									no_click_since_not_seen * duplicates * p;
-							}
-						} else {
-							doc = opt_buff[k - 1].options[0].first;
-							probability rel = rel_map[{qid, doc}].relevance;
-							probability no_click = 1 - (seen * rel);
-							probability missed = not_seen * rel;
-							// A1
-							probability no_click_since_not_rel =
-								(1 - rel) / no_click;
-							relevance_fractions[{qid, doc}].denominator +=
-								no_click_since_not_rel * duplicates;
-							// A2
-							probability no_click_since_missed =
-								missed / no_click;
-							Fraction *fraction =
-								&relevance_fractions[{qid, doc}];
-							fraction->numerator +=
-								no_click_since_missed * duplicates;
-							fraction->denominator +=
-								no_click_since_missed * duplicates;
-							// G1
-							probability no_click_since_not_seen =
-								not_seen / no_click;
-							// G2
-							probability no_click_since_seen_and_irrelevant =
-								(seen * (1 - rel)) / no_click;
-							fraction = &view_prob_fractions[key];
-							fraction->numerator +=
-								no_click_since_seen_and_irrelevant
-								* duplicates;
-							fraction->denominator +=
-								no_click_since_seen_and_irrelevant
-								* duplicates;
-							fraction->denominator +=
-								no_click_since_not_seen * duplicates;
-						}
-					}
-					doc = click_buff[j].second;
-					// A3
-					relevance_fractions[{qid, doc}].numerator += duplicates;
-					relevance_fractions[{qid, doc}].denominator += duplicates;
-					ViewBetweenClicks key = {prev_rank, rank, rank};
-					// G3
-					view_prob_fractions[key].numerator += duplicates;
-					view_prob_fractions[key].denominator += duplicates;
-					prev_rank = rank;
-				}
-			}
+		for (ui64 t = 0; t < THREADS; ++t) {
+			training_materials[t].training_data = training_data;
+			training_materials[t].is_probabilistic = is_probabilistic;
+			training_materials[t].thread_i = t;
+			rc = pthread_create(
+				&threads[t],
+				NULL,
+				process_training_data_chunk,
+				(void*) &training_materials[t]
+			);
 		}
+		for (ui64 t = 0; t < THREADS; ++t)
+			pthread_join(threads[t], NULL);
 		probability squared_error = 0;
-		for (
-			auto it = relevance_fractions.begin();
-			it != relevance_fractions.end();
-			++it
-		) {
-			QueryDocPair key = it->first;
-			Fraction fraction = it->second;
-			probability numerator = fraction.numerator;
-			probability denominator = fraction.denominator;
+		probability max_error = 0;
+		for (auto it = rel_map.begin(); it != rel_map.end(); ++it) {
+			probability numerator = 0;
+			probability denominator = 0;
+			for (ui64 i = 0; i < THREADS; ++i) {
+				numerator += it->second.rel_numerator[i];
+				it->second.rel_numerator[i] = 0;
+				denominator += it->second.rel_denominator[i];
+				it->second.rel_denominator[i] = 0;
+			}
 			probability new_rel = numerator / (denominator + 0.01);
-			probability old_rel = rel_map[key].relevance;
-			squared_error += (new_rel - old_rel) * (new_rel - old_rel);
-			rel_map[key].relevance = new_rel;
-			it->second = {0, 0};
+			probability old_rel = it->second.relevance;
+			probability error = new_rel - old_rel;
+			if (fabs(error) > max_error) max_error = fabs(error);
+			squared_error += error * error;
+			it->second.relevance = new_rel;
 		}
 		probability root_mean_squared_error =
-			sqrt(squared_error / relevance_fractions.size());
-		fprintf(stderr, "RMSE: %f\n", root_mean_squared_error);
+			sqrt(squared_error / rel_map.size());
+		fprintf(
+			stderr,
+			"RMSE (Relevance): %0.10f, Max error: %0.10f\n",
+			root_mean_squared_error, max_error);
+		squared_error = 0;
+		max_error = 0;
 		for (
-			auto it = view_prob_fractions.begin();
-			it != view_prob_fractions.end();
+			auto it = training_view_metrics.begin();
+			it != training_view_metrics.end();
 			++it
 		) {
-			ViewBetweenClicks key = it->first;
-			Fraction fraction = it->second;
-			probability numerator = fraction.numerator;
-			probability denominator = fraction.denominator;
-			view_prob_map[key] = numerator / (denominator + 0.01);
-			it->second = {0, 0};
+			probability numerator = 0;
+			probability denominator = 0;
+			for (ui64 i = 0; i < THREADS; ++i) {
+				numerator += it->view_numerator[i];
+				it->view_numerator[i] = 0;
+				denominator += it->view_denominator[i];
+				it->view_denominator[i] = 0;
+			}
+			probability old_prob = it->view_p;
+			probability new_prob = numerator / (denominator + 0.01);
+			probability error = new_prob - old_prob;
+			squared_error += error * error;
+			if (fabs(error) > max_error) max_error = fabs(error);
+			it->view_p = new_prob;
 		}
+		root_mean_squared_error =
+			sqrt(squared_error / training_view_metrics.size());
+		fprintf(
+			stderr,
+			"RMSE (Hops): %0.10f, Max error: %0.10f\n",
+			root_mean_squared_error,
+			max_error
+		);
 	}
 	QueryDocResult *result_buff =
 		(QueryDocResult*) malloc(rel_map.size() * sizeof(QueryDocResult));
@@ -421,7 +547,7 @@ void partially_sequential_click_model() {
 	for (auto it = rel_map.begin(); it != rel_map.end(); ++it)
 		result_buff[result_buff_c++] = {
 			it->first.qid,
-			it->first.doc,
+			it->first.d,
 			it->second.relevance,
 			it->second.clicks
 		};
@@ -431,10 +557,9 @@ void partially_sequential_click_model() {
 		sizeof(QueryDocResult),
 		compare_query_doc_result
 	);
-	const f64 z = z_score(config().CM_confidence);
 	const f64 z_inv_squared = (1 / z) * (1 / z);
 	const f64 omega = z_inv_squared / (1 - z_inv_squared);
-	fprintf(stderr, "OMEGA: %f\n", omega);
+	fprintf(stderr, "OMEGA: %0.10f\n", omega);
 	ui32 prev_qid = 0;
 	ui64 max_run = 0;
 	ui64 current_run = 0;
@@ -451,16 +576,16 @@ void partially_sequential_click_model() {
 		(DocumentRelevance*) malloc(max_run * sizeof(DocumentRelevance));
 	ui64 doc_rel_c = 0;
 	for (ui64 i = 0; i < result_buff_c; ++i) {
-		if (result_buff[i].doc == 0) continue;
+		if (result_buff[i].d == 0) continue;
 		ui32 qid = result_buff[i].qid;
 		if (qid != prev_qid) {
 			if (doc_rel_c > 0) {
 				fwrite(&prev_qid, sizeof(ui32), 1, stdout);
 				fwrite(&doc_rel_c, sizeof(ui64), 1, stdout);
 				for (ui64 j = 0; j < doc_rel_c; ++j) {
-					ui32 doc = doc_rel_buffer[j].doc;
+					ui32 d = doc_rel_buffer[j].d;
 					probability relevance = doc_rel_buffer[j].relevance;
-					fwrite(&doc, sizeof(ui32), 1, stdout);
+					fwrite(&d, sizeof(ui32), 1, stdout);
 					fwrite(&relevance, sizeof(probability), 1, stdout);
 				}
 				doc_rel_c = 0;
@@ -468,7 +593,7 @@ void partially_sequential_click_model() {
 			prev_qid = qid;
 		}
 		doc_rel_buffer[doc_rel_c++] = {
-			result_buff[i].doc,
+			result_buff[i].d,
 			result_buff[i].relevance
 		};
 		probability relevance = result_buff[i].relevance;
@@ -489,23 +614,25 @@ void partially_sequential_click_model() {
 		);
 		expected margin_of_error = z * standard_error;
 		probability minimal_relevance = MAX(relevance - margin_of_error, 0);
-		fprintf(
-			stderr,
-			"qid%u doc%u REL %f CLICKS: %u APPROX-VIEWS: %f MIN-REL: %f\n",
-			qid,
-			result_buff[i].doc,
-			relevance,
-			clicks,
-			view_count,
-			minimal_relevance
-		);
+		if (minimal_relevance > 0.000001) {
+			fprintf(
+				stderr,
+				"qid%u d%u REL %f CLICKS: %u APPROX-VIEWS: %f MIN-REL: %f\n",
+				qid,
+				result_buff[i].d,
+				relevance,
+				clicks,
+				view_count,
+				minimal_relevance
+			);
+		}
 	}
 	fwrite(&prev_qid, sizeof(ui32), 1, stdout);
 	fwrite(&doc_rel_c, sizeof(ui64), 1, stdout);
 	for (ui64 j = 0; j < doc_rel_c; ++j) {
-		ui32 doc = doc_rel_buffer[j].doc;
+		ui32 d = doc_rel_buffer[j].d;
 		probability relevance = doc_rel_buffer[j].relevance;
-		fwrite(&doc, sizeof(ui32), 1, stdout);
+		fwrite(&d, sizeof(ui32), 1, stdout);
 		fwrite(&relevance, sizeof(probability), 1, stdout);
 	}
 }

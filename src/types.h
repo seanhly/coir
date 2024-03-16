@@ -3,6 +3,7 @@ typedef short i16;
 typedef int i32;
 typedef bool b;
 typedef double f64;
+typedef float f32;
 typedef unsigned char ui8;
 typedef char i8;
 typedef unsigned short ui16;
