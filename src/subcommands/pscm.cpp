@@ -126,9 +126,19 @@ typedef struct {
 } Training;
 
 typedef struct {
-	A<Training> training_data;
+	Training *training_data;
+	ui64 training_data_c;
 	ui64 thread_i;
 	bool is_probabilistic;
+	pthread_barrier_t *checkpoint_one;
+	f64 rmse_rel;
+	f64 rmse_view;
+	f64 max_error_rel;
+	f64 max_error_view;
+	QueryDocMetrics *query_doc_metrics;
+	ui64 query_doc_metrics_c;
+	ViewMetrics *view_metrics;
+	ui64 view_metrics_c;
 } TrainingMaterial;
 
 int compare_query_doc_result(const void *a, const void *b) {
@@ -160,12 +170,12 @@ int compare_view_prob(const void *a, const void *b) {
 void *process_training_data_chunk(void *training_material) {
 	ui16 rank;
 	TrainingMaterial *m = (TrainingMaterial*) training_material;
-	A<Training> training_data = m->training_data;
+	Training* training_data = m->training_data;
 	bool is_probabilistic = m->is_probabilistic;
-	ui64 chunk_size = training_data.size() / THREADS;
+	ui64 chunk_size = m->training_data_c / THREADS;
 	ui64 start = m->thread_i * chunk_size;
 	ui64 end;
-	if (m->thread_i == THREADS - 1) end = training_data.size();
+	if (m->thread_i == THREADS - 1) end = m->training_data_c;
 	else end = start + chunk_size;
 	for (ui64 i = start; i < end; ++i) {
 		Training dat = training_data[i];
@@ -174,7 +184,8 @@ void *process_training_data_chunk(void *training_material) {
 			ui32 dupes = s->dupes;
 			ui16 max_rank = 0;
 			ui16 prev_rank = 0;
-			for (TrainingClick *click_ptr = s->clicks; click_ptr < s->after_clicks; ++click_ptr) {
+			for (TrainingClick *click_ptr = s->clicks;
+					click_ptr < s->after_clicks; ++click_ptr) {
 				rank = click_ptr->rank;
 				ViewMetrics *view_metrics = click_ptr->view_metrics;
 				ui32 d;
@@ -184,8 +195,12 @@ void *process_training_data_chunk(void *training_material) {
 					TrainingPoint point = s->points[k - 1];
 					const probability seen = view_metrics->view_p;
 					const probability not_seen = 1 - seen;
-					if (is_probabilistic && point.click.click_flag != CLICK_FLAG) {
-						for (TrainingRankOption *o = point.rank.options; o < point.rank.after_options; ++o) {
+					if (
+						is_probabilistic
+						&& point.click.click_flag != CLICK_FLAG
+					) {
+						for (TrainingRankOption *o = point.rank.options;
+								o < point.rank.after_options; ++o) {
 							QueryDocMetrics *metrics = o->doc_metrics;
 							probability rel = metrics->relevance;
 							probability unclicked = 1 - (seen * rel);
@@ -262,6 +277,61 @@ void *process_training_data_chunk(void *training_material) {
 			}
 		}
 	}
+	pthread_barrier_wait(m->checkpoint_one);
+	// ============================//
+	// -- STEP 2: Evaluate RMSE -- //
+	// ============================//
+	QueryDocMetrics *global_query_doc_metrics = m->query_doc_metrics;
+	chunk_size = m->query_doc_metrics_c / THREADS;
+	start = m->thread_i * chunk_size;
+	end = m->thread_i == THREADS - 1 ? m->query_doc_metrics_c :
+		start + chunk_size;
+	probability squared_error = 0;
+	probability max_error = 0;
+	for (ui64 i = start; i < end; ++i) {
+		QueryDocMetrics *mm = &global_query_doc_metrics[i];
+		probability numerator = 0;
+		probability denominator = 0;
+		for (ui64 i = 0; i < THREADS; ++i) {
+			numerator += mm->rel_numerator[i];
+			mm->rel_numerator[i] = 0;
+			denominator += mm->rel_denominator[i];
+			mm->rel_denominator[i] = 0;
+		}
+		probability new_rel = numerator / (denominator + 0.01);
+		probability old_rel = mm->relevance;
+		probability error = new_rel - old_rel;
+		if (fabs(error) > max_error) max_error = fabs(error);
+		squared_error += error * error;
+		mm->relevance = new_rel;
+	}
+	m->rmse_rel = sqrt(squared_error / m->query_doc_metrics_c);
+	m->max_error_rel = max_error;
+	ViewMetrics *global_view_metrics = m->view_metrics;
+	chunk_size = m->view_metrics_c / THREADS;
+	start = m->thread_i * chunk_size;
+	end = m->thread_i == THREADS - 1 ? m->view_metrics_c : start + chunk_size;
+	squared_error = 0;
+	max_error = 0;
+	for (ui64 i = start; i < end; ++i) {
+		ViewMetrics *mm = &global_view_metrics[i];
+		probability numerator = 0;
+		probability denominator = 0;
+		for (ui64 i = 0; i < THREADS; ++i) {
+			numerator += mm->view_numerator[i];
+			mm->view_numerator[i] = 0;
+			denominator += mm->view_denominator[i];
+			mm->view_denominator[i] = 0;
+		}
+		probability old_prob = mm->view_p;
+		probability new_prob = numerator / (denominator + 0.01);
+		probability error = new_prob - old_prob;
+		squared_error += error * error;
+		if (fabs(error) > max_error) max_error = fabs(error);
+		mm->view_p = new_prob;
+	}
+	m->rmse_view = sqrt(squared_error / m->view_metrics_c);
+	m->max_error_view = max_error;
 	return NULL;
 }
 
@@ -284,7 +354,7 @@ void partially_sequential_click_model() {
 	ui32 buff_size = 2000000000;
 	char *buffer = (char*) malloc(buff_size);
 	FILE *memstream = fmemopen(buffer, buff_size, "rb+");
-	std::unordered_map<QueryDocPair, QueryDocMetrics, QueryDocPairHash>
+	std::unordered_map<QueryDocPair, QueryDocMetrics*, QueryDocPairHash>
 		rel_map;
 	std::unordered_map<ViewBetweenClicks, ViewMetrics*, ViewBetweenClicksHash>
 		view_map;
@@ -296,14 +366,17 @@ void partially_sequential_click_model() {
 	A<TrainingClick> training_data_clicks;
 	A<TrainingPoint> training_points;
 	A<TrainingRankOption> training_data_rank_options;
-	A<ViewMetrics> training_view_metrics;
+	A<ViewMetrics> view_metrics;
+	A<QueryDocMetrics> query_doc_metrics;
 	training_data.reserve(13279574);
 	training_sessions.reserve(21633169);
 	training_data_clicks.reserve(46296250);
 	training_points.reserve(98308810);
 	training_data_rank_options.reserve(98308810);
-	training_view_metrics.reserve(98308810);
-	f64 *numens_and_denoms = (f64*) malloc(sizeof(f64) * THREADS * 2 * 98308810);
+	query_doc_metrics.reserve(98308810);
+	view_metrics.reserve(98308810);
+	f64 *numens_and_denoms =
+		(f64*) malloc(sizeof(f64) * THREADS * 2 * 98308810);
 	ui64 numens_and_denoms_c = 0;
 	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
 		safe_read(&session_c, sizeof(ui32), stdin);
@@ -348,23 +421,26 @@ void partially_sequential_click_model() {
 				}
 				ViewMetrics *metrics;
 				if (view_map.find({prev_rank, k, rank}) == view_map.end()) {
-					metrics = training_view_metrics.data() + training_view_metrics.size();
+					metrics = view_metrics.data() + view_metrics.size();
 					view_map[ViewBetweenClicks{prev_rank, k, rank}] = metrics;
 					for (; k != rank + incr; k += incr) {
 						ViewMetrics metric;
 						metric.view_p = 0.5;
-						metric.view_numerator = numens_and_denoms + numens_and_denoms_c;
+						metric.view_numerator =
+							numens_and_denoms + numens_and_denoms_c;
 						for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
 							numens_and_denoms[numens_and_denoms_c++] = 0;
-						metric.view_denominator = numens_and_denoms + numens_and_denoms_c;
+						metric.view_denominator =
+							numens_and_denoms + numens_and_denoms_c;
 						for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
 							numens_and_denoms[numens_and_denoms_c++] = 0;
-						training_view_metrics.push_back(metric);
+						view_metrics.push_back(metric);
 					}
 				} else metrics = view_map[{prev_rank, k, rank}];
 				TrainingClick click = {rank, metrics};
 				training_data_clicks.push_back(click);
-				prev_click = &training_data_clicks[training_data_clicks.size() - 1];
+				prev_click =
+					&training_data_clicks[training_data_clicks.size() - 1];
 			}
 			session.after_clicks =
 				training_data_clicks.data() + training_data_clicks.size();
@@ -378,20 +454,33 @@ void partially_sequential_click_model() {
 						ui32 d;
 						safe_read(&d, sizeof(ui32), stdin);
 						safe_read(&prop, sizeof(ui32), stdin);
+						QueryDocMetrics *metrics_ptr;
 						if (rel_map.find({qid, d}) == rel_map.end()) {
-							rel_map[{qid, d}].relevance = 0.5;
-							rel_map[{qid, d}].clicks = 1;
-							rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
-							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+							QueryDocMetrics metrics;
+							metrics.relevance = 0.5;
+							metrics.clicks = 1;
+							metrics.rel_numerator =
+								numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS;
+									++thread_i)
 								numens_and_denoms[numens_and_denoms_c++] = 0;
-							rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
-							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+							metrics.rel_denominator =
+								numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS;
+									++thread_i)
 								numens_and_denoms[numens_and_denoms_c++] = 0;
+							query_doc_metrics.push_back(metrics);
+							metrics_ptr = &query_doc_metrics[
+								query_doc_metrics.size() - 1
+							];
+							rel_map[{qid, d}] = metrics_ptr;
 						}
-						else rel_map[{qid, d}].clicks += 1;
+						else {
+							metrics_ptr = rel_map[{qid, d}];
+							metrics_ptr->clicks += 1;
+						}
 						TrainingPoint point;
-						QueryDocMetrics *metrics = &rel_map[{qid, d}];
-						point.click = {CLICK_FLAG, d, metrics};
+						point.click = {CLICK_FLAG, d, metrics_ptr};
 						training_points.push_back(point);
 					} else {
 						TrainingPoint point;
@@ -401,20 +490,32 @@ void partially_sequential_click_model() {
 						for (ui64 k = 0; k < total; k += prop) {
 							ui32 d;
 							safe_read(&d, sizeof(ui32), stdin);
+							QueryDocMetrics *metrics_ptr;
 							if (rel_map.find({qid, d}) == rel_map.end()) {
-								rel_map[{qid, d}].relevance = 0.5;
-								rel_map[{qid, d}].clicks = 0;
-								rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
-								for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
-									numens_and_denoms[numens_and_denoms_c++] = 0;
-								rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
-								for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
-									numens_and_denoms[numens_and_denoms_c++] = 0;
-							}
+								QueryDocMetrics metrics;
+								metrics.relevance = 0.5;
+								metrics.clicks = 0;
+								metrics.rel_numerator =
+									numens_and_denoms + numens_and_denoms_c;
+								for (ui64 thread_i = 0; thread_i < THREADS;
+										++thread_i)
+									numens_and_denoms[numens_and_denoms_c++] =
+										0;
+								metrics.rel_denominator =
+									numens_and_denoms + numens_and_denoms_c;
+								for (ui64 thread_i = 0; thread_i < THREADS;
+										++thread_i)
+									numens_and_denoms[numens_and_denoms_c++] =
+										0;
+								query_doc_metrics.push_back(metrics);
+								metrics_ptr = &query_doc_metrics[
+									query_doc_metrics.size() - 1
+								];
+								rel_map[{qid, d}] = metrics_ptr;
+							} else metrics_ptr = rel_map[{qid, d}];
 							safe_read(&prop, sizeof(ui32), stdin);
-							QueryDocMetrics *metrics = &rel_map[{qid, d}];
 							training_data_rank_options.push_back({
-								(f32) prop / (f32) total, d, metrics
+								(f32) prop / (f32) total, d, metrics_ptr
 							});
 						}
 						point.rank.after_options =
@@ -427,34 +528,57 @@ void partially_sequential_click_model() {
 					safe_read(&d, sizeof(ui32), stdin);
 					if (rank_clicked[rank - 1]) {
 						rank_clicked[rank - 1] = false;
+						QueryDocMetrics *metrics_ptr;
 						if (rel_map.find({qid, d}) == rel_map.end()) {
-							rel_map[{qid, d}].relevance = 0.5;
-							rel_map[{qid, d}].clicks = 1;
-							rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
-							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+							QueryDocMetrics metrics;
+							metrics.relevance = 0.5;
+							metrics.clicks = 1;
+							metrics.rel_numerator =
+								numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS;
+									++thread_i)
 								numens_and_denoms[numens_and_denoms_c++] = 0;
-							rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
-							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+							metrics.rel_denominator =
+								numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS;
+									++thread_i)
 								numens_and_denoms[numens_and_denoms_c++] = 0;
-						} else rel_map[{qid, d}].clicks += 1;
-						QueryDocMetrics *metrics = &rel_map[{qid, d}];
-						TrainingPoint point;
-						point.click = {CLICK_FLAG, d, metrics};
-						training_points.push_back(point);
-					} else {
-						if (rel_map.find({qid, d}) == rel_map.end()) {
-							rel_map[{qid, d}].relevance = 0.5;
-							rel_map[{qid, d}].clicks = 0;
-							rel_map[{qid, d}].rel_numerator = numens_and_denoms + numens_and_denoms_c;
-							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
-								numens_and_denoms[numens_and_denoms_c++] = 0;
-							rel_map[{qid, d}].rel_denominator = numens_and_denoms + numens_and_denoms_c;
-							for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
-								numens_and_denoms[numens_and_denoms_c++] = 0;
+							query_doc_metrics.push_back(metrics);
+							metrics_ptr = &query_doc_metrics[
+								query_doc_metrics.size() - 1
+							];
+							rel_map[{qid, d}] = metrics_ptr;
+						} else {
+							metrics_ptr = rel_map[{qid, d}];
+							metrics_ptr->clicks += 1;
 						}
 						TrainingPoint point;
-						QueryDocMetrics *metrics = &rel_map[{qid, d}];
-						point.click = {CLICK_FLAG, d, metrics};
+						point.click = {CLICK_FLAG, d, metrics_ptr};
+						training_points.push_back(point);
+					} else {
+						QueryDocMetrics *metrics_ptr;
+						if (rel_map.find({qid, d}) == rel_map.end()) {
+							QueryDocMetrics metrics;
+							metrics.relevance = 0.5;
+							metrics.clicks = 0;
+							metrics.rel_numerator =
+								numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS;
+									++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
+							metrics.rel_denominator =
+								numens_and_denoms + numens_and_denoms_c;
+							for (ui64 thread_i = 0; thread_i < THREADS;
+									++thread_i)
+								numens_and_denoms[numens_and_denoms_c++] = 0;
+							query_doc_metrics.push_back(metrics);
+							metrics_ptr = &query_doc_metrics[
+								query_doc_metrics.size() - 1
+							];
+							rel_map[{qid, d}] = metrics_ptr;
+						} else metrics_ptr = rel_map[{qid, d}];
+						TrainingPoint point;
+						point.click = {CLICK_FLAG, d, metrics_ptr};
 						training_points.push_back(point);
 					}
 				}
@@ -470,79 +594,49 @@ void partially_sequential_click_model() {
 	}
 	pthread_t threads[THREADS];
 	TrainingMaterial training_materials[THREADS];
+	pthread_barrier_t checkpoint_one;
+	pthread_barrier_init(&checkpoint_one, NULL, THREADS);
 	i32 rc;
 	for (ui64 t = 0; t < THREADS; ++t) {
-		training_materials[t].training_data = training_data;
+		training_materials[t].training_data = training_data.data();
+		training_materials[t].training_data_c = training_data.size();
 		training_materials[t].is_probabilistic = is_probabilistic;
 		training_materials[t].thread_i = t;
+		training_materials[t].checkpoint_one = &checkpoint_one;
+		training_materials[t].query_doc_metrics = query_doc_metrics.data();
+		training_materials[t].query_doc_metrics_c = query_doc_metrics.size();
+		training_materials[t].view_metrics = view_metrics.data();
+		training_materials[t].view_metrics_c = view_metrics.size();
+		training_materials[t].rmse_rel = 0;
+		training_materials[t].rmse_view = 0;
 	}
 	for (ui64 round = 0; round < 1000; ++round) {
 		fprintf(stderr, "EM ROUND: %lu\n", round);
-		fprintf(stderr, "Spinning up threads...\n");
-		for (ui64 t = 0; t < THREADS; ++t)
+		for (ui64 t = 1; t < THREADS; ++t)
 			rc = pthread_create(
 				&threads[t],
 				NULL,
 				process_training_data_chunk,
 				(void*) &training_materials[t]
 			);
-		fprintf(stderr, "Waiting for threads to finish...\n");
-		for (ui64 t = 0; t < THREADS; ++t)
+		process_training_data_chunk((void*) &training_materials[0]);
+		f64 rmse_rel = 0;
+		f64 rmse_view = 0;
+		f64 max_error_rel = 0;
+		f64 max_error_view = 0;
+		for (ui64 t = 1; t < THREADS; ++t) {
 			pthread_join(threads[t], NULL);
-		probability squared_error = 0;
-		probability max_error = 0;
-		for (auto it = rel_map.begin(); it != rel_map.end(); ++it) {
-			probability numerator = 0;
-			probability denominator = 0;
-			for (ui64 i = 0; i < THREADS; ++i) {
-				numerator += it->second.rel_numerator[i];
-				it->second.rel_numerator[i] = 0;
-				denominator += it->second.rel_denominator[i];
-				it->second.rel_denominator[i] = 0;
-			}
-			probability new_rel = numerator / (denominator + 0.01);
-			probability old_rel = it->second.relevance;
-			probability error = new_rel - old_rel;
-			if (fabs(error) > max_error) max_error = fabs(error);
-			squared_error += error * error;
-			it->second.relevance = new_rel;
+			rmse_rel += training_materials[t].rmse_rel;
+			rmse_view += training_materials[t].rmse_view;
+			if (training_materials[t].max_error_rel > max_error_rel)
+				max_error_rel = training_materials[t].max_error_rel;
+			if (training_materials[t].max_error_view > max_error_view)
+				max_error_view = training_materials[t].max_error_view;
 		}
-		probability root_mean_squared_error =
-			sqrt(squared_error / rel_map.size());
-		fprintf(
-			stderr,
-			"RMSE (Relevance): %0.10f, Max error: %0.10f\n",
-			root_mean_squared_error, max_error);
-		squared_error = 0;
-		max_error = 0;
-		for (
-			auto it = training_view_metrics.begin();
-			it != training_view_metrics.end();
-			++it
-		) {
-			probability numerator = 0;
-			probability denominator = 0;
-			for (ui64 i = 0; i < THREADS; ++i) {
-				numerator += it->view_numerator[i];
-				it->view_numerator[i] = 0;
-				denominator += it->view_denominator[i];
-				it->view_denominator[i] = 0;
-			}
-			probability old_prob = it->view_p;
-			probability new_prob = numerator / (denominator + 0.01);
-			probability error = new_prob - old_prob;
-			squared_error += error * error;
-			if (fabs(error) > max_error) max_error = fabs(error);
-			it->view_p = new_prob;
-		}
-		root_mean_squared_error =
-			sqrt(squared_error / training_view_metrics.size());
-		fprintf(
-			stderr,
-			"RMSE (Hops): %0.10f, Max error: %0.10f\n",
-			root_mean_squared_error,
-			max_error
-		);
+		printf("RMSE REL: %f\n", rmse_rel / THREADS);
+		printf("RMSE VIEW: %f\n", rmse_view / THREADS);
+		printf("MAX ERROR REL: %f\n", max_error_rel);
+		printf("MAX ERROR VIEW: %f\n", max_error_view);
 	}
 	QueryDocResult *result_buff =
 		(QueryDocResult*) malloc(rel_map.size() * sizeof(QueryDocResult));
@@ -551,8 +645,8 @@ void partially_sequential_click_model() {
 		result_buff[result_buff_c++] = {
 			it->first.qid,
 			it->first.d,
-			it->second.relevance,
-			it->second.clicks
+			it->second->relevance,
+			it->second->clicks
 		};
 	qsort(
 		result_buff,
