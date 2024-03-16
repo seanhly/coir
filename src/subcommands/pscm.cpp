@@ -471,19 +471,20 @@ void partially_sequential_click_model() {
 	pthread_t threads[THREADS];
 	TrainingMaterial training_materials[THREADS];
 	i32 rc;
+	for (ui64 t = 0; t < THREADS; ++t) {
+		training_materials[t].training_data = training_data;
+		training_materials[t].is_probabilistic = is_probabilistic;
+		training_materials[t].thread_i = t;
+	}
 	for (ui64 round = 0; round < 1000; ++round) {
 		fprintf(stderr, "EM ROUND: %lu\n", round);
-		for (ui64 t = 0; t < THREADS; ++t) {
-			training_materials[t].training_data = training_data;
-			training_materials[t].is_probabilistic = is_probabilistic;
-			training_materials[t].thread_i = t;
+		for (ui64 t = 0; t < THREADS; ++t)
 			rc = pthread_create(
 				&threads[t],
 				NULL,
 				process_training_data_chunk,
 				(void*) &training_materials[t]
 			);
-		}
 		for (ui64 t = 0; t < THREADS; ++t)
 			pthread_join(threads[t], NULL);
 		probability squared_error = 0;
