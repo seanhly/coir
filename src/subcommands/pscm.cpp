@@ -478,6 +478,7 @@ void partially_sequential_click_model() {
 	}
 	for (ui64 round = 0; round < 1000; ++round) {
 		fprintf(stderr, "EM ROUND: %lu\n", round);
+		fprintf(stderr, "Spinning up threads...\n");
 		for (ui64 t = 0; t < THREADS; ++t)
 			rc = pthread_create(
 				&threads[t],
@@ -485,6 +486,7 @@ void partially_sequential_click_model() {
 				process_training_data_chunk,
 				(void*) &training_materials[t]
 			);
+		fprintf(stderr, "Waiting for threads to finish...\n");
 		for (ui64 t = 0; t < THREADS; ++t)
 			pthread_join(threads[t], NULL);
 		probability squared_error = 0;
