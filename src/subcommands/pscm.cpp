@@ -264,13 +264,6 @@ void *process_training_data_chunk(void *training_material) {
 							unclicked_since_not_seen * dupes;
 					}
 				}
-				d = s->points[rank - 1].click.d;
-				QueryDocMetrics *metrics =
-					s->points[rank - 1].click.doc_metrics;
-				// A3
-				metrics->rel_numerator[m->thread_i] += dupes;
-				metrics->rel_denominator[m->thread_i] += dupes;
-				// G3
 				view_metrics->view_numerator[m->thread_i] += dupes;
 				view_metrics->view_denominator[m->thread_i] += dupes;
 				prev_rank = rank;
@@ -278,9 +271,9 @@ void *process_training_data_chunk(void *training_material) {
 		}
 	}
 	pthread_barrier_wait(m->checkpoint_one);
-	// ============================//
-	// -- STEP 2: Evaluate RMSE -- //
-	// ============================//
+	// ==============================================================//
+	// -- STEP 2: Update relevance, calculate RMSE, re-initialise -- //
+	// ==============================================================//
 	QueryDocMetrics *global_query_doc_metrics = m->query_doc_metrics;
 	chunk_size = m->query_doc_metrics_c / THREADS;
 	start = m->thread_i * chunk_size;
@@ -290,8 +283,8 @@ void *process_training_data_chunk(void *training_material) {
 	probability max_error = 0;
 	for (ui64 i = start; i < end; ++i) {
 		QueryDocMetrics *mm = &global_query_doc_metrics[i];
-		probability numerator = 0;
-		probability denominator = 0;
+		probability numerator = mm->clicks;
+		probability denominator = mm->clicks;
 		for (ui64 i = 0; i < THREADS; ++i) {
 			numerator += mm->rel_numerator[i];
 			mm->rel_numerator[i] = 0;
@@ -458,7 +451,7 @@ void partially_sequential_click_model() {
 						if (rel_map.find({qid, d}) == rel_map.end()) {
 							QueryDocMetrics metrics;
 							metrics.relevance = 0.5;
-							metrics.clicks = 1;
+							metrics.clicks = dupes;
 							metrics.rel_numerator =
 								numens_and_denoms + numens_and_denoms_c;
 							for (ui64 thread_i = 0; thread_i < THREADS;
@@ -477,7 +470,7 @@ void partially_sequential_click_model() {
 						}
 						else {
 							metrics_ptr = rel_map[{qid, d}];
-							metrics_ptr->clicks += 1;
+							metrics_ptr->clicks += dupes;
 						}
 						TrainingPoint point;
 						point.click = {CLICK_FLAG, d, metrics_ptr};
@@ -490,7 +483,9 @@ void partially_sequential_click_model() {
 						for (ui64 k = 0; k < total; k += prop) {
 							ui32 d;
 							safe_read(&d, sizeof(ui32), stdin);
+							safe_read(&prop, sizeof(ui32), stdin);
 							QueryDocMetrics *metrics_ptr;
+							f32 doc_p = (f32) prop / (f32) total;
 							if (rel_map.find({qid, d}) == rel_map.end()) {
 								QueryDocMetrics metrics;
 								metrics.relevance = 0.5;
@@ -513,9 +508,8 @@ void partially_sequential_click_model() {
 								];
 								rel_map[{qid, d}] = metrics_ptr;
 							} else metrics_ptr = rel_map[{qid, d}];
-							safe_read(&prop, sizeof(ui32), stdin);
 							training_data_rank_options.push_back({
-								(f32) prop / (f32) total, d, metrics_ptr
+								doc_p, d, metrics_ptr
 							});
 						}
 						point.rank.after_options =
@@ -532,7 +526,7 @@ void partially_sequential_click_model() {
 						if (rel_map.find({qid, d}) == rel_map.end()) {
 							QueryDocMetrics metrics;
 							metrics.relevance = 0.5;
-							metrics.clicks = 1;
+							metrics.clicks = dupes;
 							metrics.rel_numerator =
 								numens_and_denoms + numens_and_denoms_c;
 							for (ui64 thread_i = 0; thread_i < THREADS;
@@ -550,7 +544,7 @@ void partially_sequential_click_model() {
 							rel_map[{qid, d}] = metrics_ptr;
 						} else {
 							metrics_ptr = rel_map[{qid, d}];
-							metrics_ptr->clicks += 1;
+							metrics_ptr->clicks += dupes;
 						}
 						TrainingPoint point;
 						point.click = {CLICK_FLAG, d, metrics_ptr};
@@ -610,8 +604,10 @@ void partially_sequential_click_model() {
 		training_materials[t].rmse_rel = 0;
 		training_materials[t].rmse_view = 0;
 	}
-	for (ui64 round = 0; round < 1000; ++round) {
-		fprintf(stderr, "EM ROUND: %lu\n", round);
+	for (ui64 round = 0; round < 10; ++round) {
+		fprintf(stderr, "[%lu]", round);
+		for (ui64 r = round | 1; r <= 9999; r *= 10) fputs(" ", stderr);
+		fprintf(stderr, "...");
 		for (ui64 t = 1; t < THREADS; ++t)
 			rc = pthread_create(
 				&threads[t],
@@ -633,10 +629,24 @@ void partially_sequential_click_model() {
 			if (training_materials[t].max_error_view > max_error_view)
 				max_error_view = training_materials[t].max_error_view;
 		}
-		printf("RMSE REL: %f\n", rmse_rel / THREADS);
-		printf("RMSE VIEW: %f\n", rmse_view / THREADS);
-		printf("MAX ERROR REL: %f\n", max_error_rel);
-		printf("MAX ERROR VIEW: %f\n", max_error_view);
+		fprintf(stderr, "\b\b\b");
+		fprintf(stderr, "%sRMSE %s⍺%s:%0.8f %sγ%s:%0.8f%s | %sMax(E) %s⍺%s:%0.8f %sγ%s:%0.8f\n",
+			GREEN,
+			YELLOW,
+			RESET,
+			rmse_rel / THREADS,
+			YELLOW,
+			RESET,
+			rmse_view / THREADS,
+			RESET,
+			GREEN,
+			YELLOW,
+			RESET,
+			max_error_rel,
+			YELLOW,
+			RESET,
+			max_error_view
+		);
 	}
 	QueryDocResult *result_buff =
 		(QueryDocResult*) malloc(rel_map.size() * sizeof(QueryDocResult));
