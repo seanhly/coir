@@ -125,6 +125,11 @@ void convert_dense_click_log(
 			qid = qid * 10 + (c - '0');
 			c = fgetc(rankings_fp);
 		}
+		if (qid != prev_query) {
+			fprintf(stderr, "error: queries in the CSV should be sorted by query ID\n");
+			exit(1);
+		}
+		prev_query = qid;
 		sid = 0;
 		c = fgetc(rankings_fp);
 		while (c != ',') {
@@ -134,7 +139,6 @@ void convert_dense_click_log(
 		if (qid != session.query) {
 			if (session.session_c > 0) {
 				fprintf(stderr, "Query %d\n", session.query);
-				fwrite(&session.query, sizeof(ui32), 1, stdout);
 				qsort(
 					session.sessions,
 					session.session_c,

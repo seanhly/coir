@@ -341,7 +341,6 @@ void partially_sequential_click_model() {
 	safe_read(&file_opts, sizeof(ui8), stdin);
 	const f64 z = z_score(config().CM_confidence);
 	const bool is_probabilistic = file_opts == PROBABILISTIC_RANK_DATA;
-	ui32 qid;
 	ui32 session_c;
 	ui32 dupes;
 	ui16 click_c;
@@ -354,7 +353,6 @@ void partially_sequential_click_model() {
 		rel_map;
 	std::unordered_map<ViewBetweenClicks, ViewMetrics*, ViewBetweenClicksHash>
 		view_map;
-	ui64 qid_c = 0;
 	ui16 *rank_clicks = (ui16*) malloc(sizeof(ui16) * MAX_RANK);
 	for (ui32 i = 0; i < MAX_RANK; ++i) rank_clicks[i] = 0;
 	A<Training> training_data;
@@ -374,8 +372,8 @@ void partially_sequential_click_model() {
 	f64 *numens_and_denoms =
 		(f64*) malloc(sizeof(f64) * THREADS * 2 * 98308810);
 	ui64 numens_and_denoms_c = 0;
-	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
-		safe_read(&session_c, sizeof(ui32), stdin);
+	ui32 qid = 1;
+	while (fread(&session_c, sizeof(ui32), 1, stdin) == 1) {
 		Training data = {
 			qid,
 			training_sessions.data() + training_sessions.size(),
@@ -589,7 +587,7 @@ void partially_sequential_click_model() {
 		data.after_sessions =
 			training_sessions.data() + training_sessions.size();
 		training_data.push_back(data);
-		qid_c++;
+		++qid;
 	}
 	pthread_t threads[THREADS];
 	TrainingMaterial training_materials[THREADS];
