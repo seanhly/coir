@@ -58,10 +58,10 @@ void convert_dense_click_log(
 ) {
 	ui8 file_opts = CONCRETE_RANK_DATA;
 	fwrite(&file_opts, sizeof(ui8), 1, stdout);
-	// Create a stream via zcat
-	char *zcat_cmd = (char*) malloc(1000 * sizeof(char));
-	sprintf(zcat_cmd, "/usr/bin/pv %s | /usr/bin/zcat", click_log_path);
-	FILE *click_log_fp = popen(zcat_cmd, "r");
+	// Create a stream via zstdcat
+	char *zstdcat_cmd = (char*) malloc(1000 * sizeof(char));
+	sprintf(zstdcat_cmd, "/usr/bin/pv %s | /usr/bin/zstdcat", click_log_path);
+	FILE *click_log_fp = popen(zstdcat_cmd, "r");
 	// an unordered_map to store the click sessuences by search ID
 	ClickSession *sessions = (ClickSession*)
 		malloc(100000000 * sizeof(ClickSession));
@@ -111,8 +111,8 @@ void convert_dense_click_log(
 	ui32 qid;
 	ui32 doc = 0;
 	pclose(click_log_fp);
-	sprintf(zcat_cmd, "/usr/bin/pv %s | /usr/bin/zcat", rankings_path);
-	FILE *rankings_fp = popen(zcat_cmd, "r");
+	sprintf(zstdcat_cmd, "/usr/bin/pv %s | /usr/bin/zstdcat", rankings_path);
+	FILE *rankings_fp = popen(zstdcat_cmd, "r");
 	ui32 prev_query = 0;
 	prev_sid = 0;
 	DenseQuerySession session;
@@ -243,5 +243,5 @@ void convert_dense_click_log(
 			session.session_c - 1];
 		click_session->ranked_docs_c++;
 	}
-	free(zcat_cmd);
+	free(zstdcat_cmd);
 }

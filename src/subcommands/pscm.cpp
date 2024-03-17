@@ -9,9 +9,9 @@
 #include <vector>
 #include <pthread.h>
 
-template<typename T> using A = std::vector<T>;
-
 const ui32 CLICK_FLAG = (ui32) 0xFFFFFFFF;
+
+template<typename T> using A = std::vector<T>;
 
 typedef struct ViewBetweenClicksStruct {
 	ui16 before;
@@ -104,6 +104,7 @@ typedef struct {
 	probability view_p;
 	f64 *view_numerator;
 	f64 *view_denominator;
+	ui64 certain_view_c;
 } ViewMetrics;
 
 typedef struct {
@@ -131,8 +132,8 @@ typedef struct {
 	ui64 thread_i;
 	bool is_probabilistic;
 	pthread_barrier_t *checkpoint_one;
-	f64 rmse_rel;
-	f64 rmse_view;
+	f64 squared_error_rel;
+	f64 squared_error_view;
 	f64 max_error_rel;
 	f64 max_error_view;
 	QueryDocMetrics *query_doc_metrics;
@@ -153,21 +154,10 @@ int compare_query_doc_result(const void *a, const void *b) {
 	return 0;
 }
 
-int compare_view_prob(const void *a, const void *b) {
-	ViewBetweenClicksResult *a_r = (ViewBetweenClicksResult*) a;
-	ViewBetweenClicksResult *b_r = (ViewBetweenClicksResult*) b;
-	if (a_r->after < b_r->after) return -1;
-	if (a_r->after > b_r->after) return +1;
-	if (a_r->before < b_r->before) return -1;
-	if (a_r->before > b_r->before) return +1;
-	if (a_r->view < b_r->view) return -1;
-	if (a_r->view > b_r->view) return +1;
-	if (a_r->p < b_r->p) return +1;
-	if (a_r->p > b_r->p) return -1;
-	return 0;
-}
-
 void *process_training_data_chunk(void *training_material) {
+	// =========================================================//
+	// -- STEP 1: Apply the model to the training data chunk -- //
+	// =========================================================//
 	ui16 rank;
 	TrainingMaterial *m = (TrainingMaterial*) training_material;
 	Training* training_data = m->training_data;
@@ -195,10 +185,8 @@ void *process_training_data_chunk(void *training_material) {
 					TrainingPoint point = s->points[k - 1];
 					const probability seen = view_metrics->view_p;
 					const probability not_seen = 1 - seen;
-					if (
-						is_probabilistic
-						&& point.click.click_flag != CLICK_FLAG
-					) {
+					if (is_probabilistic && point.click.click_flag
+							!= CLICK_FLAG) {
 						for (TrainingRankOption *o = point.rank.options;
 								o < point.rank.after_options; ++o) {
 							QueryDocMetrics *metrics = o->doc_metrics;
@@ -264,8 +252,23 @@ void *process_training_data_chunk(void *training_material) {
 							unclicked_since_not_seen * dupes;
 					}
 				}
-				view_metrics->view_numerator[m->thread_i] += dupes;
-				view_metrics->view_denominator[m->thread_i] += dupes;
+				/*
+				 * // G3
+				 * view_metrics->view_numerator[m->thread_i] += dupes;
+				 * view_metrics->view_denominator[m->thread_i] += dupes;
+				 *
+				 * QueryDocMetrics *metrics =
+				 *     s->points[rank - 1].click.doc_metrics;
+				 * // A3
+				 * metrics->rel_numerator[m->thread_i] += dupes;
+				 * metrics->rel_denominator[m->thread_i] += dupes;
+				 * 
+				 * ... the above five SLOCs were optimised away ...
+				 * 
+				 * ... see how 'click' counts are initially placed in the
+				 * numerator and denominator when the threads are getting
+				 * merged in the evaluation phase.
+				 */
 				prev_rank = rank;
 			}
 		}
@@ -277,8 +280,8 @@ void *process_training_data_chunk(void *training_material) {
 	QueryDocMetrics *global_query_doc_metrics = m->query_doc_metrics;
 	chunk_size = m->query_doc_metrics_c / THREADS;
 	start = m->thread_i * chunk_size;
-	end = m->thread_i == THREADS - 1 ? m->query_doc_metrics_c :
-		start + chunk_size;
+	end = m->thread_i == THREADS - 1 ?
+		m->query_doc_metrics_c : start + chunk_size;
 	probability squared_error = 0;
 	probability max_error = 0;
 	for (ui64 i = start; i < end; ++i) {
@@ -298,7 +301,7 @@ void *process_training_data_chunk(void *training_material) {
 		squared_error += error * error;
 		mm->relevance = new_rel;
 	}
-	m->rmse_rel = sqrt(squared_error / m->query_doc_metrics_c);
+	m->squared_error_rel = squared_error;
 	m->max_error_rel = max_error;
 	ViewMetrics *global_view_metrics = m->view_metrics;
 	chunk_size = m->view_metrics_c / THREADS;
@@ -308,8 +311,8 @@ void *process_training_data_chunk(void *training_material) {
 	max_error = 0;
 	for (ui64 i = start; i < end; ++i) {
 		ViewMetrics *mm = &global_view_metrics[i];
-		probability numerator = 0;
-		probability denominator = 0;
+		probability numerator = mm->certain_view_c;
+		probability denominator = mm->certain_view_c;
 		for (ui64 i = 0; i < THREADS; ++i) {
 			numerator += mm->view_numerator[i];
 			mm->view_numerator[i] = 0;
@@ -323,7 +326,7 @@ void *process_training_data_chunk(void *training_material) {
 		if (fabs(error) > max_error) max_error = fabs(error);
 		mm->view_p = new_prob;
 	}
-	m->rmse_view = sqrt(squared_error / m->view_metrics_c);
+	m->squared_error_view = squared_error;
 	m->max_error_view = max_error;
 	return NULL;
 }
@@ -352,8 +355,8 @@ void partially_sequential_click_model() {
 	std::unordered_map<ViewBetweenClicks, ViewMetrics*, ViewBetweenClicksHash>
 		view_map;
 	ui64 qid_c = 0;
-	bool *rank_clicked = (bool*) malloc(sizeof(bool) * MAX_RANK);
-	for (ui32 i = 0; i < MAX_RANK; ++i) rank_clicked[i] = false;
+	ui16 *rank_clicks = (ui16*) malloc(sizeof(ui16) * MAX_RANK);
+	for (ui32 i = 0; i < MAX_RANK; ++i) rank_clicks[i] = 0;
 	A<Training> training_data;
 	A<TrainingSession> training_sessions;
 	A<TrainingClick> training_data_clicks;
@@ -388,7 +391,7 @@ void partially_sequential_click_model() {
 				training_points.data() + training_points.size(),
 				NULL
 			};
-			TrainingClick *prev_click = NULL;
+			ui16 prev_click = 0;
 			ui16 max_rank = 0;
 			for (ui32 j = 0; j < click_c; ++j) {
 				if (j == 0) {
@@ -396,20 +399,20 @@ void partially_sequential_click_model() {
 				} else {
 					i8 hop;
 					safe_read(&hop, sizeof(i8), stdin);
-					rank = prev_click->rank + hop;
+					rank = prev_click + hop;
 				}
-				rank_clicked[rank - 1] = true;
+				if (rank_clicks[rank - 1] != 0xFFFF) ++rank_clicks[rank - 1];
 				if (rank > max_rank) max_rank = rank;
 				i16 incr;
 				ui16 k;
 				ui16 prev_rank;
-				if (prev_click == NULL) {
+				if (prev_click == 0) {
 					k = 1;
 					prev_rank = 0;
 					incr = 1;
 				} else {
-					k = prev_click->rank;
-					prev_rank = prev_click->rank;
+					k = prev_click;
+					prev_rank = prev_click;
 					incr = prev_rank <= rank ? 1 : -1;
 				}
 				ViewMetrics *metrics;
@@ -419,6 +422,7 @@ void partially_sequential_click_model() {
 					for (; k != rank + incr; k += incr) {
 						ViewMetrics metric;
 						metric.view_p = 0.5;
+						metric.certain_view_c = k == rank ? dupes : 0;
 						metric.view_numerator =
 							numens_and_denoms + numens_and_denoms_c;
 						for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
@@ -429,11 +433,14 @@ void partially_sequential_click_model() {
 							numens_and_denoms[numens_and_denoms_c++] = 0;
 						view_metrics.push_back(metric);
 					}
-				} else metrics = view_map[{prev_rank, k, rank}];
-				TrainingClick click = {rank, metrics};
-				training_data_clicks.push_back(click);
-				prev_click =
-					&training_data_clicks[training_data_clicks.size() - 1];
+				} else {
+					metrics = view_map[{prev_rank, k, rank}];
+					ViewMetrics *metric_at_rank;
+					metric_at_rank = metrics + abs(k - rank);
+					metric_at_rank->certain_view_c += dupes;
+				}
+				training_data_clicks.push_back({rank, metrics});
+				prev_click = rank;
 			}
 			session.after_clicks =
 				training_data_clicks.data() + training_data_clicks.size();
@@ -442,8 +449,7 @@ void partially_sequential_click_model() {
 					ui32 total;
 					safe_read(&total, sizeof(ui32), stdin);
 					ui32 prop;
-					if (rank_clicked[rank - 1]) {
-						rank_clicked[rank - 1] = false;
+					if (rank_clicks[rank - 1]) {
 						ui32 d;
 						safe_read(&d, sizeof(ui32), stdin);
 						safe_read(&prop, sizeof(ui32), stdin);
@@ -451,7 +457,7 @@ void partially_sequential_click_model() {
 						if (rel_map.find({qid, d}) == rel_map.end()) {
 							QueryDocMetrics metrics;
 							metrics.relevance = 0.5;
-							metrics.clicks = dupes;
+							metrics.clicks = dupes * rank_clicks[rank - 1];
 							metrics.rel_numerator =
 								numens_and_denoms + numens_and_denoms_c;
 							for (ui64 thread_i = 0; thread_i < THREADS;
@@ -467,10 +473,9 @@ void partially_sequential_click_model() {
 								query_doc_metrics.size() - 1
 							];
 							rel_map[{qid, d}] = metrics_ptr;
-						}
-						else {
+						} else {
 							metrics_ptr = rel_map[{qid, d}];
-							metrics_ptr->clicks += dupes;
+							metrics_ptr->clicks += dupes * rank_clicks[rank - 1];
 						}
 						TrainingPoint point;
 						point.click = {CLICK_FLAG, d, metrics_ptr};
@@ -520,13 +525,12 @@ void partially_sequential_click_model() {
 				} else {
 					ui32 d;
 					safe_read(&d, sizeof(ui32), stdin);
-					if (rank_clicked[rank - 1]) {
-						rank_clicked[rank - 1] = false;
+					if (rank_clicks[rank - 1]) {
 						QueryDocMetrics *metrics_ptr;
 						if (rel_map.find({qid, d}) == rel_map.end()) {
 							QueryDocMetrics metrics;
 							metrics.relevance = 0.5;
-							metrics.clicks = dupes;
+							metrics.clicks = dupes * rank_clicks[rank - 1];
 							metrics.rel_numerator =
 								numens_and_denoms + numens_and_denoms_c;
 							for (ui64 thread_i = 0; thread_i < THREADS;
@@ -544,7 +548,7 @@ void partially_sequential_click_model() {
 							rel_map[{qid, d}] = metrics_ptr;
 						} else {
 							metrics_ptr = rel_map[{qid, d}];
-							metrics_ptr->clicks += dupes;
+							metrics_ptr->clicks += dupes * rank_clicks[rank - 1];
 						}
 						TrainingPoint point;
 						point.click = {CLICK_FLAG, d, metrics_ptr};
@@ -576,6 +580,7 @@ void partially_sequential_click_model() {
 						training_points.push_back(point);
 					}
 				}
+				rank_clicks[rank - 1] = 0;
 			}
 			session.after_points =
 				training_points.data() + training_points.size();
@@ -601,13 +606,15 @@ void partially_sequential_click_model() {
 		training_materials[t].query_doc_metrics_c = query_doc_metrics.size();
 		training_materials[t].view_metrics = view_metrics.data();
 		training_materials[t].view_metrics_c = view_metrics.size();
-		training_materials[t].rmse_rel = 0;
-		training_materials[t].rmse_view = 0;
+		training_materials[t].squared_error_rel = 0;
+		training_materials[t].squared_error_view = 0;
 	}
 	for (ui64 round = 0; round < 10; ++round) {
+		/*
 		fprintf(stderr, "[%lu]", round);
 		for (ui64 r = round | 1; r <= 9999; r *= 10) fputs(" ", stderr);
 		fprintf(stderr, "...");
+		*/
 		for (ui64 t = 1; t < THREADS; ++t)
 			rc = pthread_create(
 				&threads[t],
@@ -616,28 +623,30 @@ void partially_sequential_click_model() {
 				(void*) &training_materials[t]
 			);
 		process_training_data_chunk((void*) &training_materials[0]);
-		f64 rmse_rel = 0;
-		f64 rmse_view = 0;
-		f64 max_error_rel = 0;
-		f64 max_error_view = 0;
+		f64 squared_error_rel = training_materials[0].squared_error_rel;
+		f64 squared_error_view = training_materials[0].squared_error_view;
+		f64 max_error_rel = training_materials[0].max_error_rel;
+		f64 max_error_view = training_materials[0].max_error_view;
 		for (ui64 t = 1; t < THREADS; ++t) {
 			pthread_join(threads[t], NULL);
-			rmse_rel += training_materials[t].rmse_rel;
-			rmse_view += training_materials[t].rmse_view;
+			squared_error_rel += training_materials[t].squared_error_rel;
+			squared_error_view += training_materials[t].squared_error_view;
 			if (training_materials[t].max_error_rel > max_error_rel)
 				max_error_rel = training_materials[t].max_error_rel;
 			if (training_materials[t].max_error_view > max_error_view)
 				max_error_view = training_materials[t].max_error_view;
 		}
 		fprintf(stderr, "\b\b\b");
-		fprintf(stderr, "%sRMSE %s⍺%s:%0.8f %sγ%s:%0.8f%s | %sMax(E) %s⍺%s:%0.8f %sγ%s:%0.8f\n",
+		fprintf(
+			stderr,
+			"%sRMSE %s⍺%s:%0.8f %sγ%s:%0.8f%s | %sMax(E) %s⍺%s:%0.8f %sγ%s:%0.8f\n",
 			GREEN,
 			YELLOW,
 			RESET,
-			rmse_rel / THREADS,
+			sqrt(squared_error_rel / query_doc_metrics.size()),
 			YELLOW,
 			RESET,
-			rmse_view / THREADS,
+			sqrt(squared_error_view / view_metrics.size()),
 			RESET,
 			GREEN,
 			YELLOW,
@@ -658,6 +667,7 @@ void partially_sequential_click_model() {
 			it->second->relevance,
 			it->second->clicks
 		};
+	exit(0);
 	qsort(
 		result_buff,
 		result_buff_c,

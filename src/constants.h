@@ -23,4 +23,4 @@ const char* RESET = "\033[0m";
 
 #define MAX_RANK 4000
 
-#define THREADS 6
+#define THREADS 16
