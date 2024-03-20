@@ -1,16 +1,16 @@
-#define HELP_MESSAGE "Usage: lrr [SUBCOMMAND] [ARGUMENTS]\n"
+#define HELP_MESSAGE "Usage: librecoir [SUBCOMMAND] [ARGUMENTS]\n"
 
 const char *HELP_HELP_MESSAGE =
-"Usage: lrr help\n"
-"       lrr help [SUBCOMMAND] [ARGUMENTS]\n"
+"Usage: librecoir help\n"
+"       librecoir help [SUBCOMMAND] [ARGUMENTS]\n"
 "\n"
 "Prints help information (generally or for a specific subcommand)."
 ;
 const char *RERANK_HELP_MESSAGE =
-"Usage: lrr iaf_rerank [QID]\n"
-"       lrr [QID]\n"
-"       lrr iaf_rerank [QID] < [QREL_FILE (1)]\n"
-"       lrr iaf_rerank < [QREL_FILE (2)]\n"
+"Usage: librecoir iaf_rerank [QID]\n"
+"       librecoir [QID]\n"
+"       librecoir iaf_rerank [QID] < [QREL_FILE (1)]\n"
+"       librecoir iaf_rerank < [QREL_FILE (2)]\n"
 "\n"
 "Produces a re-ranking for the documents in the QREL_FILE, given a query ID."
 "\n"
@@ -30,4 +30,4 @@ const char *RERANK_HELP_MESSAGE =
 "The first format is used when the query ID is provided as a command-line argument.\n"
 "The second format is used when the query ID is provided via standard input."
 ;
-#define DAEMON_HELP_MESSAGE "Usage: lrr daemon\n"
+#define DAEMON_HELP_MESSAGE "Usage: librecoir daemon\n"

@@ -625,12 +625,15 @@ void queue_job() {
 		fclose(JOB_FILE);
 		JOB_FILE = NULL;
 	}
-	if (mkfifo(job_end_fifo_buffer().buffer, 0600) == -1)
+	if (mkfifo(job_end_fifo_buffer().buffer, 0777) == -1)
 		err_exit("mkfifo");
 	safe_write_item(&CURRENT_JOB, sizeof(job_id), append_queue());
-	fflush(stdout);
 	fflush(append_queue());
+printf("%u\n", 2);
+fflush(stdout);
 	read_job_end_file();
+printf("%u\n", 1);
+fflush(stdout);
 }
 
 docid docid_from_stdin(char &c) {
@@ -699,9 +702,9 @@ ui64 client_update_relevance(f64 quality_threshold) {
 			duplicate_doc_id_err();
 		} else doc_hashes.insert(doc);
 	}
-	if (doc_hashes.size() == 0)
+	if (doc_hashes.size() == 0) {
 		safe_file_remove(job_start_path_buffer().buffer);
-	else {
+	} else {
 		doc_hashes.clear();
 		queue_job();
 	}
@@ -946,7 +949,8 @@ int main(int argc, char *argv[]) {
 			show_candidates(quality_threshold);
 			break;
 		case DAEMON:
-			if (extra_args || input_pipe_open)
+			fprintf(stderr, "Starting daemon.\n");
+			if (extra_args)
 				print_subcommand_help_then_halt(DAEMON, 1);
 			start_daemon();
 			break;

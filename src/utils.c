@@ -86,7 +86,7 @@ PathBuffer id_str_map_buffer() {
 	strcat(ID_STR_MAP_PATH.buffer, "id_str_map/");
 	struct stat st;
 	if (stat(ID_STR_MAP_PATH.buffer, &st) == -1)
-		mkdir(ID_STR_MAP_PATH.buffer, 0700);
+		mkdir(ID_STR_MAP_PATH.buffer, 0707);
 	ID_STR_MAP_PATH.buffer[str_len + 18] = '\0';
 	ID_STR_MAP_PATH.length = str_len;
 	return ID_STR_MAP_PATH;
@@ -116,7 +116,7 @@ char *get_orig_doc_id_path(docid doc) {
 	}
 	id_str_map_path[id_str_map_length + 2] = '\0';
 	struct stat st = {0};
-	if (stat(id_str_map_path, &st) == -1) mkdir(id_str_map_path, 0700);
+	if (stat(id_str_map_path, &st) == -1) mkdir(id_str_map_path, 0707);
 	id_str_map_path[id_str_map_length + 2] = '/';
 	for (int i = 2; i < 4; i++) {
 		char c = (char) ((doc >> (i * 4)) & 0xF);
@@ -124,7 +124,7 @@ char *get_orig_doc_id_path(docid doc) {
 			c < 10 ? c + '0' : c - 10 + 'a';
 	}
 	id_str_map_path[id_str_map_length + 5] = '\0';
-	if (stat(id_str_map_path, &st) == -1) mkdir(id_str_map_path, 0700);
+	if (stat(id_str_map_path, &st) == -1) mkdir(id_str_map_path, 0707);
 	id_str_map_path[id_str_map_length + 5] = '/';
 	for (int i = 4; i < 16; i++) {
 		char c = (char) ((doc >> (i * 4)) & 0xF);

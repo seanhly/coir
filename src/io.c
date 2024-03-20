@@ -6,7 +6,9 @@
 #include <stdio.h>
 
 void safe_file_remove(const char *path) {
-    if (remove(path) != 0) err_exit("remove");
+    if (remove(path) != 0) {
+    	err_exit(path);
+	}
 }
 
 qid qid_from_client() {
@@ -142,7 +144,8 @@ qid qid_from_stdin(char &c) {
         focus_buffer[offset++] = c;
     }
     focus_buffer[offset] = '\0';
-    return gen_id();
+    qid query = gen_id();
+    return query;
 }
 
 void doc_to_qrel(docid doc) {

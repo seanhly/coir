@@ -125,8 +125,8 @@ void convert_dense_click_log(
 			qid = qid * 10 + (c - '0');
 			c = fgetc(rankings_fp);
 		}
-		if (qid != prev_query + 1) {
-			fprintf(stderr, "error: queries in the CSV should be sorted by query ID\n");
+		if (qid < prev_query || qid - prev_query > 1) {
+			fprintf(stderr, "error: lines in the CSV should be sorted by query ID\n");
 			exit(1);
 		}
 		prev_query = qid;

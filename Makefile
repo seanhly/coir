@@ -1,6 +1,6 @@
 build:
-	(mkdir -p bin && cd src && g++ -O3 coir.cpp -o ../bin/coir -lcrypto -lm)
+	(mkdir -p bin && cd src && g++ -O3 librecoir.cpp -o ../bin/librecoir -lcrypto -lm)
 install: build
-	mv bin/coir /usr/bin
+	sudo ./src/install.sh
 run-daemon: build
-	./bin/coir daemon
+	./bin/librecoir daemon
