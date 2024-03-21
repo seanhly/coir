@@ -39,20 +39,6 @@ char *var_dir_path() {
 	return VAR_DIR_PATH;
 }
 
-char *cache_dir_path() {
-	if (CACHE_DIR_PATH == NULL) {
-		char *config_home = getenv("XDG_CACHE_HOME");
-		if (config_home == NULL) {
-			char *home = getenv("HOME");
-			config_home = (char*) malloc(strlen(home) + 14);
-			strcpy(config_home, home);
-			strcat(config_home, "/.cache/");
-		}
-		CACHE_DIR_PATH = config_home;
-	}
-	return CACHE_DIR_PATH;
-}
-
 char *config_dir_path() {
 	if (CONFIG_DIR_PATH == NULL) {
 		char *config_home = getenv("XDG_CONFIG_HOME");

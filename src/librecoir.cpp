@@ -179,6 +179,7 @@ Context context_from_sorted_candidates(
 
 void update_relevance() {
 	set_query(qid_from_client());
+	b();
 	f64 quality_threshold = quality_threshold_from_client();
 	Candidate *doc_relevance_update = doc_relevance_update_buffer();
 	ui64 row = 0;
@@ -460,9 +461,9 @@ void gen_iaf_re_ranking_inner(
 			if (candidate->relevance >= min_rel && !candidate->masked)
 				break;
 		}
-		if (mode == STANDALONE)
+		if (mode == STANDALONE) {
 			doc_to_client(candidate->doc);
-		get_orig_doc_id(candidate->doc);
+		}
 		candidate->masked = true;
 		before_weight += discounted_gain(candidate->relevance, rnk);
 		ranking[rnk - 1] = {rnk, candidate};
@@ -625,15 +626,13 @@ void queue_job() {
 		fclose(JOB_FILE);
 		JOB_FILE = NULL;
 	}
-	if (mkfifo(job_end_fifo_buffer().buffer, 0777) == -1)
+	umask(0);
+	if (mkfifo(job_end_fifo_buffer().buffer, 0666) == -1) {
 		err_exit("mkfifo");
+	}
 	safe_write_item(&CURRENT_JOB, sizeof(job_id), append_queue());
 	fflush(append_queue());
-printf("%u\n", 2);
-fflush(stdout);
 	read_job_end_file();
-printf("%u\n", 1);
-fflush(stdout);
 }
 
 docid docid_from_stdin(char &c) {
@@ -742,7 +741,6 @@ void fairco_rerank() {
 			break;
 		one_result_found = true;
 		get_orig_doc_id(doc);
-		printf("%s\n", get_focus_buffer());
 	} while (true);
 	if (!one_result_found) qid_unknown_err();
 }

@@ -79,7 +79,7 @@ char *get_focus_buffer() {
 
 PathBuffer id_str_map_buffer() {
 	if (ID_STR_MAP_PATH.length > 0) return ID_STR_MAP_PATH;
-	char *cache_dir = cache_dir_path();
+	char *cache_dir = var_dir_path();
 	int str_len = strlen(cache_dir) + 11;
 	ID_STR_MAP_PATH.buffer = (char*) malloc(str_len + 19);
 	strcpy(ID_STR_MAP_PATH.buffer, cache_dir);
