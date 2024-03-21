@@ -341,7 +341,6 @@ void partially_sequential_click_model() {
 	safe_read(&file_opts, sizeof(ui8), stdin);
 	const f64 z = z_score(config().CM_confidence);
 	const bool is_probabilistic = file_opts == PROBABILISTIC_RANK_DATA;
-	ui32 session_c;
 	ui32 dupes;
 	ui16 click_c;
 	ui16 rank;
@@ -373,6 +372,7 @@ void partially_sequential_click_model() {
 		(f64*) malloc(sizeof(f64) * THREADS * 2L * (13279574L + 2000000L));
 	ui64 numens_and_denoms_c = 0;
 	ui32 qid = 1;
+	ui32 session_c;
 	while (fread(&session_c, sizeof(ui32), 1, stdin) == 1) {
 		Training data = {
 			qid,
@@ -473,7 +473,8 @@ void partially_sequential_click_model() {
 							rel_map[{qid, d}] = metrics_ptr;
 						} else {
 							metrics_ptr = rel_map[{qid, d}];
-							metrics_ptr->clicks += dupes * rank_clicks[rank - 1];
+							metrics_ptr->clicks +=
+								dupes * rank_clicks[rank - 1];
 						}
 						TrainingPoint point;
 						point.click = {CLICK_FLAG, d, metrics_ptr};
@@ -546,7 +547,8 @@ void partially_sequential_click_model() {
 							rel_map[{qid, d}] = metrics_ptr;
 						} else {
 							metrics_ptr = rel_map[{qid, d}];
-							metrics_ptr->clicks += dupes * rank_clicks[rank - 1];
+							metrics_ptr->clicks += dupes
+								* rank_clicks[rank - 1];
 						}
 						TrainingPoint point;
 						point.click = {CLICK_FLAG, d, metrics_ptr};
@@ -608,11 +610,9 @@ void partially_sequential_click_model() {
 		training_materials[t].squared_error_view = 0;
 	}
 	for (ui64 round = 0; round < 10; ++round) {
-		/*
 		fprintf(stderr, "[%lu]", round);
 		for (ui64 r = round | 1; r <= 9999; r *= 10) fputs(" ", stderr);
 		fprintf(stderr, "...");
-		*/
 		for (ui64 t = 1; t < THREADS; ++t)
 			rc = pthread_create(
 				&threads[t],

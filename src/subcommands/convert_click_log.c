@@ -33,7 +33,6 @@ int compare_session(const void *a, const void *b) {
 }
 
 void print_query(Query query) {
-	fwrite(&query.query, sizeof(ui32), 1, stdout);
 	fwrite(&query.session_c, sizeof(ui32), 1, stdout);
 	for (ui32 i = 0; i < query.session_c; ++i) {
 		fwrite(&query.sessions[i].sid, sizeof(ui32), 1, stdout);
@@ -72,6 +71,7 @@ void convert_click_log() {
 	ui32 sid;
 	ui16 pos;
 	ui16 doc;
+	ui32 prev_query = 0;
 	// Read a character from the standard input
 	new_line:
 		char c = getchar();
@@ -97,6 +97,12 @@ void convert_click_log() {
 				printf("comma expected after qid on line %lu\n", line);
 				exit(1);
 			}
+			if (qid < prev_query || qid - prev_query > 1) {
+				fprintf(stderr,
+					"error: lines in the CSV should be sorted by query ID\n");
+				exit(1);
+			}
+			prev_query = qid;
 		c = getchar();
 		if (c == EOF) {
 			printf(

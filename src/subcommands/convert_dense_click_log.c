@@ -126,7 +126,8 @@ void convert_dense_click_log(
 			c = fgetc(rankings_fp);
 		}
 		if (qid < prev_query || qid - prev_query > 1) {
-			fprintf(stderr, "error: lines in the CSV should be sorted by query ID\n");
+			fprintf(stderr,
+				"error: lines in the CSV should be sorted by query ID\n");
 			exit(1);
 		}
 		prev_query = qid;
@@ -173,7 +174,8 @@ void convert_dense_click_log(
 						&session.sessions[i];
 					fwrite(&click_session->duplicates,
 						sizeof(ui32), 1, stdout);
-					fprintf(stderr, "\tDuplicates: %d\n", click_session->duplicates);
+					fprintf(stderr,
+						"\tDuplicates: %d\n", click_session->duplicates);
 					fprintf(stderr, "\tClicks: %d\n", click_session->click_c);
 					ui16 click_c = 1;
 					ui16 prev_rank = click_session->clicks[0];
@@ -196,7 +198,8 @@ void convert_dense_click_log(
 					for (ui16 j = 0; j < click_c; j++) {
 						ui16 rank = click_session->clicks[j];
 						if (rank > max_rank) max_rank = rank;
-						fprintf(stderr, "\t\t>> CLICKED << %d\n", click_session->clicks[j]);
+						fprintf(stderr, "\t\t>> CLICKED << %d\n",
+							click_session->clicks[j]);
 						if (j == 0) fwrite(&rank, sizeof(ui16), 1, stdout);
 						else {
 							i8 gap = (ui32) rank - (ui32) prev_rank;
@@ -204,7 +207,8 @@ void convert_dense_click_log(
 						}
 						prev_rank = rank;
 					}
-					fprintf(stderr, "\tRanked docs count: %d\n", click_session->ranked_docs_c);
+					fprintf(stderr, "\tRanked docs count: %d\n",
+						click_session->ranked_docs_c);
 					// Iterate over ranked docs...
 					fprintf(stderr, "\t");
 					for (ui32 j = 0; j < max_rank; j++) {
