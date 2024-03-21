@@ -370,7 +370,7 @@ void partially_sequential_click_model() {
 	query_doc_metrics.reserve(98308810);
 	view_metrics.reserve(98308810);
 	f64 *numens_and_denoms =
-		(f64*) malloc(sizeof(f64) * THREADS * 2 * 98308810);
+		(f64*) malloc(sizeof(f64) * THREADS * 2L * (13279574L + 2000000L));
 	ui64 numens_and_denoms_c = 0;
 	ui32 qid = 1;
 	while (fread(&session_c, sizeof(ui32), 1, stdin) == 1) {
@@ -423,7 +423,7 @@ void partially_sequential_click_model() {
 						metric.certain_view_c = k == rank ? dupes : 0;
 						metric.view_numerator =
 							numens_and_denoms + numens_and_denoms_c;
-						for (ui64 thread_i = 0; thread_i < THREADS; ++thread_i)
+						for (ui64 t_i = 0; t_i < THREADS; ++t_i)
 							numens_and_denoms[numens_and_denoms_c++] = 0;
 						metric.view_denominator =
 							numens_and_denoms + numens_and_denoms_c;
