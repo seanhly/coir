@@ -36,4 +36,7 @@ bin/
 
 .RData
 .Rhistory
-data/csv
+data/00_csvs
+data/01_sparse_input_bin/aol_sparse.bin.zst
+data/02_dense_input_bin
+data/03_model_bin
