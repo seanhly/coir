@@ -1,3 +1,6 @@
+#ifndef STATS_H
+#define STATS_H
+
 const f64 z_score_table[] = {
 	0.00000000000000000,
 	0.01253346950806926,
@@ -109,3 +112,5 @@ const f64 z_score(unsigned char confidence) {
 	}
 	return z_score_table[confidence];
 }
+
+#endif

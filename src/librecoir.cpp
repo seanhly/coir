@@ -34,6 +34,7 @@ qid CURRENT_QUERY;
 #include "subcommands/read_config.c"
 #include "subcommands/read_relevancy_file.c"
 #include "subcommands/convert_dense_click_log.c"
+#include "subcommands/confident_min_relevance.cpp"
 
 std::unordered_map<ui64, Context> CANDIDATES;
 
@@ -854,6 +855,8 @@ int main(int argc, char *argv[]) {
 		subcommand = READ_SPARSE_CLICK_LOG;
 	else if (strcmp(*argv, "read-dense-click-log") == 0)
 		subcommand = READ_DENSE_CLICK_LOG;
+	else if (strcmp(*argv, "confident-min-relevance") == 0)
+		subcommand = CONFIDENT_MIN_RELEVANCE;
 	else if (strcmp(*argv, "click-log-probable-rank-docs") == 0)
 		subcommand = CLICK_LOG_PROBABLE_RANK_DOCS;
 	else if (strcmp(*argv, "click-log-predict-rankings") == 0)
@@ -916,6 +919,14 @@ int main(int argc, char *argv[]) {
 			if (extra_args || !input_pipe_open)
 				print_subcommand_help_then_halt(READ_DENSE_CLICK_LOG, 1);
 			read_dense_click_log();
+			break;
+		case CONFIDENT_MIN_RELEVANCE:
+			probability confidence;
+			if (!input_pipe_open)
+				print_subcommand_help_then_halt(CONFIDENT_MIN_RELEVANCE, 1);
+			if (extra_args) confidence = atof(*argv);
+			else confidence = -1; // Let the config file decide
+			confident_min_relevance(confidence);
 			break;
 		case CLICK_LOG_PROBABLE_RANK_DOCS:
 			if (extra_args || !input_pipe_open)

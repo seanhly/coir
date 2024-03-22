@@ -70,8 +70,9 @@ typedef struct {
 
 typedef struct {
 	ui32 d;
+	ui32 clicks;
 	probability relevance;
-} DocumentRelevance;
+} DocumentClicksRelevance;
 
 typedef struct {
 	f64 numerator;
@@ -183,6 +184,7 @@ void *process_training_data_chunk(void *training_material) {
 				ui16 k = prev_rank == 0 ? 1 : prev_rank;
 				for (; k != rank; k += incr, ++view_metrics) {
 					TrainingPoint point = s->points[k - 1];
+					fflush(stdout);
 					const probability seen = view_metrics->view_p;
 					const probability not_seen = 1 - seen;
 					if (is_probabilistic && point.click.click_flag
@@ -339,7 +341,6 @@ void *process_training_data_chunk(void *training_material) {
 void partially_sequential_click_model() {
 	ui8 file_opts;
 	safe_read(&file_opts, sizeof(ui8), stdin);
-	const f64 z = z_score(config().CM_confidence);
 	const bool is_probabilistic = file_opts == PROBABILISTIC_RANK_DATA;
 	ui32 dupes;
 	ui16 click_c;
@@ -369,7 +370,7 @@ void partially_sequential_click_model() {
 	query_doc_metrics.reserve(98308810);
 	view_metrics.reserve(98308810);
 	f64 *numens_and_denoms =
-		(f64*) malloc(sizeof(f64) * THREADS * 2L * (13279574L + 2000000L));
+		(f64*) malloc(sizeof(f64) * THREADS * 2L * (13279574L + 45440874L));
 	ui64 numens_and_denoms_c = 0;
 	ui32 qid = 1;
 	ui32 session_c;
@@ -665,89 +666,62 @@ void partially_sequential_click_model() {
 			it->second->relevance,
 			it->second->clicks
 		};
-	exit(0);
 	qsort(
 		result_buff,
 		result_buff_c,
 		sizeof(QueryDocResult),
 		compare_query_doc_result
 	);
-	const f64 z_inv_squared = (1 / z) * (1 / z);
-	const f64 omega = z_inv_squared / (1 - z_inv_squared);
-	fprintf(stderr, "OMEGA: %0.10f\n", omega);
-	ui32 prev_qid = 0;
+	ui32 prev_query = 0;
 	ui64 max_run = 0;
 	ui64 current_run = 0;
 	for (ui64 i = 0; i < result_buff_c; ++i) {
-		if (prev_qid != result_buff[i].qid) {
-			prev_qid = result_buff[i].qid;
+		if (prev_query != result_buff[i].qid) {
+			prev_query = result_buff[i].qid;
 			if (current_run > max_run) max_run = current_run;
 			current_run = 0;
 		}
 		++current_run;
 	}
 	if (current_run > max_run) max_run = current_run;
-	DocumentRelevance *doc_rel_buffer =
-		(DocumentRelevance*) malloc(max_run * sizeof(DocumentRelevance));
+	fwrite(&max_run, sizeof(ui64), 1, stdout);
+	DocumentClicksRelevance *doc_rel_buffer =
+		(DocumentClicksRelevance*)
+			malloc(max_run * sizeof(DocumentClicksRelevance));
 	ui64 doc_rel_c = 0;
 	for (ui64 i = 0; i < result_buff_c; ++i) {
 		if (result_buff[i].d == 0) continue;
-		ui32 qid = result_buff[i].qid;
-		if (qid != prev_qid) {
+		ui32 query = result_buff[i].qid;
+		if (query != prev_query) {
 			if (doc_rel_c > 0) {
-				fwrite(&prev_qid, sizeof(ui32), 1, stdout);
+				fwrite(&prev_query, sizeof(ui32), 1, stdout);
 				fwrite(&doc_rel_c, sizeof(ui64), 1, stdout);
 				for (ui64 j = 0; j < doc_rel_c; ++j) {
 					ui32 d = doc_rel_buffer[j].d;
 					probability relevance = doc_rel_buffer[j].relevance;
+					ui32 clicks = doc_rel_buffer[j].clicks;
 					fwrite(&d, sizeof(ui32), 1, stdout);
+					fwrite(&clicks, sizeof(ui32), 1, stdout);
 					fwrite(&relevance, sizeof(probability), 1, stdout);
 				}
 				doc_rel_c = 0;
 			}
-			prev_qid = qid;
+			prev_query = query;
 		}
 		doc_rel_buffer[doc_rel_c++] = {
 			result_buff[i].d,
+			result_buff[i].clicks,
 			result_buff[i].relevance
 		};
-		probability relevance = result_buff[i].relevance;
-		ui32 clicks = result_buff[i].clicks;
-		expected view_count = result_buff[i].clicks / result_buff[i].relevance;
-		expected standard_error = sqrt(
-				(
-					(
-						(clicks + omega) / (view_count + omega)
-					)
-					*
-					(
-						1 - clicks / (view_count + omega)
-					)
-				)
-				/
-				view_count
-		);
-		expected margin_of_error = z * standard_error;
-		probability minimal_relevance = MAX(relevance - margin_of_error, 0);
-		if (minimal_relevance > 0.000001) {
-			fprintf(
-				stderr,
-				"qid%u d%u REL %f CLICKS: %u APPROX-VIEWS: %f MIN-REL: %f\n",
-				qid,
-				result_buff[i].d,
-				relevance,
-				clicks,
-				view_count,
-				minimal_relevance
-			);
-		}
 	}
-	fwrite(&prev_qid, sizeof(ui32), 1, stdout);
+	fwrite(&prev_query, sizeof(ui32), 1, stdout);
 	fwrite(&doc_rel_c, sizeof(ui64), 1, stdout);
 	for (ui64 j = 0; j < doc_rel_c; ++j) {
 		ui32 d = doc_rel_buffer[j].d;
 		probability relevance = doc_rel_buffer[j].relevance;
+		ui32 clicks = doc_rel_buffer[j].clicks;
 		fwrite(&d, sizeof(ui32), 1, stdout);
+		fwrite(&clicks, sizeof(ui32), 1, stdout);
 		fwrite(&relevance, sizeof(probability), 1, stdout);
 	}
 }

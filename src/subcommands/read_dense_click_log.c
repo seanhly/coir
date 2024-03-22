@@ -14,8 +14,7 @@ void read_dense_click_log() {
 	ui16 click_c;
 	ui16 rank;
 	ui32 doc;
-	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
-		safe_read(&session_c, sizeof(ui32), stdin);
+	while (fread(&session_c, sizeof(ui32), 1, stdin) == 1) {
 		printf("qid: %u\n", qid);
 		printf("session_c: %u\n", session_c);
 		for (ui32 i = 0; i < session_c; ++i) {
@@ -58,5 +57,6 @@ void read_dense_click_log() {
 				}
 			}
 		}
+		++qid;
 	}
 }

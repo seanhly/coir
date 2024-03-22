@@ -139,7 +139,7 @@ void convert_dense_click_log(
 		}
 		if (qid != session.query) {
 			if (session.session_c > 0) {
-				fprintf(stderr, "Query %d\n", session.query);
+				//fprintf(stderr, "Query %d\n", session.query);
 				qsort(
 					session.sessions,
 					session.session_c,
@@ -167,16 +167,15 @@ void convert_dense_click_log(
 				}
 				session.session_c = i + 1;
 				fwrite(&session.session_c, sizeof(ui32), 1, stdout);
-				fprintf(stderr, "Session count: %lu\n", session.session_c);
+				//fprintf(stderr, "Session count: %lu\n", session.session_c);
 				// Iterate over click sessions...
 				for (ui64 i = 0; i < session.session_c; i++) {
 					ClickSession *click_session =
 						&session.sessions[i];
 					fwrite(&click_session->duplicates,
 						sizeof(ui32), 1, stdout);
-					fprintf(stderr,
-						"\tDuplicates: %d\n", click_session->duplicates);
-					fprintf(stderr, "\tClicks: %d\n", click_session->click_c);
+					//fprintf(stderr, "\tDuplicates: %d\n", click_session->duplicates);
+					//fprintf(stderr, "\tClicks: %d\n", click_session->click_c);
 					ui16 click_c = 1;
 					ui16 prev_rank = click_session->clicks[0];
 					ui32 max_click_c = click_session->click_c;
@@ -198,8 +197,7 @@ void convert_dense_click_log(
 					for (ui16 j = 0; j < click_c; j++) {
 						ui16 rank = click_session->clicks[j];
 						if (rank > max_rank) max_rank = rank;
-						fprintf(stderr, "\t\t>> CLICKED << %d\n",
-							click_session->clicks[j]);
+						//fprintf(stderr, "\t\t>> CLICKED << %d\n", click_session->clicks[j]);
 						if (j == 0) fwrite(&rank, sizeof(ui16), 1, stdout);
 						else {
 							i8 gap = (ui32) rank - (ui32) prev_rank;
@@ -207,16 +205,15 @@ void convert_dense_click_log(
 						}
 						prev_rank = rank;
 					}
-					fprintf(stderr, "\tRanked docs count: %d\n",
-						click_session->ranked_docs_c);
+					//fprintf(stderr, "\tRanked docs count: %d\n", click_session->ranked_docs_c);
 					// Iterate over ranked docs...
-					fprintf(stderr, "\t");
+					//fprintf(stderr, "\t");
 					for (ui32 j = 0; j < max_rank; j++) {
 						ui32 doc = click_session->ranked_docs[j];
-						fprintf(stderr, "doc%u@%u ", doc, j + 1);
+						//fprintf(stderr, "doc%u@%u ", doc, j + 1);
 						fwrite(&doc, sizeof(ui32), 1, stdout);
 					}
-					fprintf(stderr, "\n");
+					//fprintf(stderr, "\n");
 				}
 			}
 			session.query = qid;

@@ -33,6 +33,7 @@ typedef enum {
 	READ_RELEVANCY_FILE,
 	CONVERT_DENSE_CLICK_LOG,
 	READ_DENSE_CLICK_LOG,
+	CONFIDENT_MIN_RELEVANCE,
 } Subcommand;
 
 typedef enum {
