@@ -847,8 +847,8 @@ int main(int argc, char *argv[]) {
 	else if (strcmp(*argv, "candidates") == 0) subcommand = SHOW_CANDIDATES;
 	else if (strcmp(*argv, "daemon") == 0) subcommand = DAEMON;
 	else if (strcmp(*argv, "experiment") == 0) subcommand = EXPERIMENT;
-	else if (strcmp(*argv, "convert-click-log") == 0)
-		subcommand = CONVERT_CLICK_LOG;
+	else if (strcmp(*argv, "convert-sparse-click-log") == 0)
+		subcommand = CONVERT_SPARSE_CLICK_LOG;
 	else if (strcmp(*argv, "convert-dense-click-log") == 0)
 		subcommand = CONVERT_DENSE_CLICK_LOG;
 	else if (strcmp(*argv, "read-sparse-click-log") == 0)
@@ -905,9 +905,9 @@ int main(int argc, char *argv[]) {
 				print_subcommand_help_then_halt(READ_CONFIG, 1);
 			read_config();
 			break;
-		case CONVERT_CLICK_LOG:
+		case CONVERT_SPARSE_CLICK_LOG:
 			if (extra_args || !input_pipe_open)
-				print_subcommand_help_then_halt(CONVERT_CLICK_LOG, 1);
+				print_subcommand_help_then_halt(CONVERT_SPARSE_CLICK_LOG, 1);
 			convert_click_log();
 			break;
 		case READ_SPARSE_CLICK_LOG:
@@ -1000,10 +1000,10 @@ int main(int argc, char *argv[]) {
 			}
 			break;
 		case PARTIALLY_SEQUENTIAL_CLICK_MODEL:
-			if (extra_args || !input_pipe_open)
+			if (argc != 2 || !input_pipe_open)
 				print_subcommand_help_then_halt(
 					PARTIALLY_SEQUENTIAL_CLICK_MODEL, 1);
-			partially_sequential_click_model();
+			partially_sequential_click_model(argv);
 			break;
 		case READ_RELEVANCY_FILE:
 			if (extra_args || !input_pipe_open)

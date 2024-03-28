@@ -4,17 +4,16 @@
 
 
 void read_relevancy_file() {
-	ui32 qid;
-	ui64 result_c;
-	ui32 doc;
-	f64 relevance;
-	printf("qid,doc,run,relevance\n");
-	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
-		safe_read(&result_c, sizeof(ui64), stdin);
-		for (ui64 i = 0; i < result_c; ++i) {
-			safe_read(&doc, sizeof(ui32), stdin);
-			safe_read(&relevance, sizeof(f64), stdin);
-			printf("%u,%u,%lu,%f\n", qid, doc, i + 1, relevance);
+	ui32 query;
+	while (fread(&query, sizeof(ui32), 1, stdin) == 1) {
+		while (1) {
+			ui8 relevance8;
+			safe_read(&relevance8, sizeof(ui8), stdin);
+			probability relevance = relevance8 / 255.0;
+			if (relevance8 == 0) break;
+			ui32 d;
+			safe_read(&d, sizeof(ui32), stdin);
+			printf("q: %u, d: %u, relevance: %f\n", query, d, relevance);
 		}
 	}
 }

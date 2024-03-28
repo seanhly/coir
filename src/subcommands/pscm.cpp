@@ -338,7 +338,14 @@ void *process_training_data_chunk(void *training_material) {
  * Wang, C., Liu, Y., Wang, M., Zhou, K., Nie, J., & Ma, S. (2015).
  * Incorporating Non-sequential Behavior into Click Models.
  */
-void partially_sequential_click_model() {
+void partially_sequential_click_model(char **args) {
+	char *the_directory = args[0];
+	char *the_label = args[1];
+	if (strlen(the_directory) == 0) {
+		fprintf(stderr, "no the_directory specified.\n");
+		exit(1);
+	}
+	char *zstd_cmd = (char*) malloc(130);
 	ui8 file_opts;
 	safe_read(&file_opts, sizeof(ui8), stdin);
 	const bool is_probabilistic = file_opts == PROBABILISTIC_RANK_DATA;
@@ -597,6 +604,7 @@ void partially_sequential_click_model() {
 	pthread_barrier_t checkpoint_one;
 	pthread_barrier_init(&checkpoint_one, NULL, THREADS);
 	i32 rc;
+	DocumentClicksRelevance *doc_rel_buffer = NULL;
 	for (ui64 t = 0; t < THREADS; ++t) {
 		training_materials[t].training_data = training_data.data();
 		training_materials[t].training_data_c = training_data.size();
@@ -610,7 +618,11 @@ void partially_sequential_click_model() {
 		training_materials[t].squared_error_rel = 0;
 		training_materials[t].squared_error_view = 0;
 	}
-	for (ui64 round = 0; round < 10; ++round) {
+	QueryDocResult *result_buff =
+		(QueryDocResult*) malloc(rel_map.size() * sizeof(QueryDocResult));
+	ui64 max_run = 0;
+	ui64 next_print = 1;
+	for (ui64 round = 0; round < 100; ++round) {
 		fprintf(stderr, "[%lu]", round);
 		for (ui64 r = round | 1; r <= 9999; r *= 10) fputs(" ", stderr);
 		fprintf(stderr, "...");
@@ -655,73 +667,91 @@ void partially_sequential_click_model() {
 			RESET,
 			max_error_view
 		);
-	}
-	QueryDocResult *result_buff =
-		(QueryDocResult*) malloc(rel_map.size() * sizeof(QueryDocResult));
-	ui64 result_buff_c = 0;
-	for (auto it = rel_map.begin(); it != rel_map.end(); ++it)
-		result_buff[result_buff_c++] = {
-			it->first.qid,
-			it->first.d,
-			it->second->relevance,
-			it->second->clicks
-		};
-	qsort(
-		result_buff,
-		result_buff_c,
-		sizeof(QueryDocResult),
-		compare_query_doc_result
-	);
-	ui32 prev_query = 0;
-	ui64 max_run = 0;
-	ui64 current_run = 0;
-	for (ui64 i = 0; i < result_buff_c; ++i) {
-		if (prev_query != result_buff[i].qid) {
-			prev_query = result_buff[i].qid;
-			if (current_run > max_run) max_run = current_run;
-			current_run = 0;
-		}
-		++current_run;
-	}
-	if (current_run > max_run) max_run = current_run;
-	fwrite(&max_run, sizeof(ui64), 1, stdout);
-	DocumentClicksRelevance *doc_rel_buffer =
-		(DocumentClicksRelevance*)
-			malloc(max_run * sizeof(DocumentClicksRelevance));
-	ui64 doc_rel_c = 0;
-	for (ui64 i = 0; i < result_buff_c; ++i) {
-		if (result_buff[i].d == 0) continue;
-		ui32 query = result_buff[i].qid;
-		if (query != prev_query) {
-			if (doc_rel_c > 0) {
-				fwrite(&prev_query, sizeof(ui32), 1, stdout);
-				fwrite(&doc_rel_c, sizeof(ui64), 1, stdout);
-				for (ui64 j = 0; j < doc_rel_c; ++j) {
-					ui32 d = doc_rel_buffer[j].d;
-					probability relevance = doc_rel_buffer[j].relevance;
-					ui32 clicks = doc_rel_buffer[j].clicks;
-					fwrite(&d, sizeof(ui32), 1, stdout);
-					fwrite(&clicks, sizeof(ui32), 1, stdout);
-					fwrite(&relevance, sizeof(probability), 1, stdout);
+		ui64 result_buff_c = 0;
+		for (auto it = rel_map.begin(); it != rel_map.end(); ++it)
+			result_buff[result_buff_c++] = {
+				it->first.qid,
+				it->first.d,
+				it->second->relevance,
+				it->second->clicks
+			};
+		qsort(
+			result_buff,
+			result_buff_c,
+			sizeof(QueryDocResult),
+			compare_query_doc_result
+		);
+		ui32 prev_query = 0;
+		if (max_run == 0) {
+			ui64 current_run = 0;
+			for (ui64 i = 0; i < result_buff_c; ++i) {
+				if (prev_query != result_buff[i].qid) {
+					prev_query = result_buff[i].qid;
+					if (current_run > max_run) max_run = current_run;
+					current_run = 0;
 				}
-				doc_rel_c = 0;
+				++current_run;
 			}
-			prev_query = query;
+			if (current_run > max_run) max_run = current_run;
 		}
-		doc_rel_buffer[doc_rel_c++] = {
-			result_buff[i].d,
-			result_buff[i].clicks,
-			result_buff[i].relevance
-		};
-	}
-	fwrite(&prev_query, sizeof(ui32), 1, stdout);
-	fwrite(&doc_rel_c, sizeof(ui64), 1, stdout);
-	for (ui64 j = 0; j < doc_rel_c; ++j) {
-		ui32 d = doc_rel_buffer[j].d;
-		probability relevance = doc_rel_buffer[j].relevance;
-		ui32 clicks = doc_rel_buffer[j].clicks;
-		fwrite(&d, sizeof(ui32), 1, stdout);
-		fwrite(&clicks, sizeof(ui32), 1, stdout);
-		fwrite(&relevance, sizeof(probability), 1, stdout);
+		if (round + 1 == next_print) {
+			sprintf(
+				zstd_cmd,
+				"/usr/bin/zstd > %s/%s_PSCM_%03lu.bin.zst",
+				the_directory, the_label, round
+			);
+			printf("%s\n", zstd_cmd);
+	    	FILE *zstd = popen(zstd_cmd, "w");
+	    	if (zstd == NULL) {
+				perror("popen");
+				exit(1);
+	    	}
+			fwrite(&max_run, sizeof(ui64), 1, zstd);
+			if (doc_rel_buffer == NULL)
+				doc_rel_buffer =
+					(DocumentClicksRelevance*)
+						malloc(max_run * sizeof(DocumentClicksRelevance));
+			ui64 doc_rel_c = 0;
+			for (ui64 i = 0; i < result_buff_c; ++i) {
+				if (result_buff[i].d == 0) continue;
+				ui32 query = result_buff[i].qid;
+				if (query != prev_query) {
+					if (doc_rel_c > 0) {
+						fwrite(&prev_query, sizeof(ui32), 1, zstd);
+						fwrite(&doc_rel_c, sizeof(ui64), 1, zstd);
+						for (ui64 j = 0; j < doc_rel_c; ++j) {
+							ui32 d = doc_rel_buffer[j].d;
+							probability relevance = doc_rel_buffer[j].relevance;
+							ui32 clicks = doc_rel_buffer[j].clicks;
+							fwrite(&d, sizeof(ui32), 1, zstd);
+							fwrite(&clicks, sizeof(ui32), 1, zstd);
+							fwrite(&relevance, sizeof(probability), 1, zstd);
+						}
+						doc_rel_c = 0;
+					}
+					prev_query = query;
+				}
+				doc_rel_buffer[doc_rel_c++] = {
+					result_buff[i].d,
+					result_buff[i].clicks,
+					result_buff[i].relevance
+				};
+			}
+			fwrite(&prev_query, sizeof(ui32), 1, zstd);
+			fwrite(&doc_rel_c, sizeof(ui64), 1, zstd);
+			for (ui64 j = 0; j < doc_rel_c; ++j) {
+				ui32 d = doc_rel_buffer[j].d;
+				probability relevance = doc_rel_buffer[j].relevance;
+				ui32 clicks = doc_rel_buffer[j].clicks;
+				fwrite(&d, sizeof(ui32), 1, zstd);
+				fwrite(&clicks, sizeof(ui32), 1, zstd);
+				fwrite(&relevance, sizeof(probability), 1, zstd);
+			}
+			if (pclose(zstd) == -1) {
+				perror("pclose");
+				exit(1);
+			}
+			next_print *= 2;
+		}
 	}
 }

@@ -7,7 +7,6 @@
 #include <stdint.h>
 #include "../stats.c"
 #include <vector>
-#include <pthread.h>
 
 typedef struct {
 	ui32 d;
@@ -69,16 +68,20 @@ void confident_min_relevance(probability confidence) {
 			doc_rel_buffer, doc_rel_buffer_c, sizeof(DocRel), compare_doc_rel
 		);
 		if (doc_rel_buffer_c > 0) {
-			fprintf(stderr, "Query: %u\n", query);
-			fprintf(stderr, "\tDoc rels: %lu\n", doc_rel_buffer_c);
+			fwrite(&query, sizeof(ui32), 1, stdout);
+			ui8 relevance8;
 			for (ui64 i = 0; i < doc_rel_buffer_c; ++i) {
-					fprintf(
-						stderr,
-						"\t\td:%u min-rel:%f\n",
-						doc_rel_buffer[i].d,
-						doc_rel_buffer[i].relevance
-					);
+				ui32 d = doc_rel_buffer[i].d;
+				probability relevance = doc_rel_buffer[i].relevance;
+				relevance8 = (ui8) (relevance * 255);
+				fwrite(&relevance8, sizeof(ui8), 1, stdout);
+				fwrite(&d, sizeof(ui32), 1, stdout);
+				fprintf(stderr,
+					"q: %u, d: %u, relevance: %u\n", query, d, relevance8);
 			}
+			// End of list
+			relevance8 = 0;
+			fwrite(&relevance8, sizeof(ui8), 1, stdout);
 		}
 	}
 }

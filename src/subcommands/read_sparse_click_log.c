@@ -4,15 +4,14 @@
 
 
 void read_sparse_click_log() {
-	ui32 qid;
 	ui32 session_c;
 	ui32 sid;
 	ui32 duplicates;
 	ui16 click_c;
 	ui16 pos;
 	ui32 url;
-	while (fread(&qid, sizeof(ui32), 1, stdin) == 1) {
-		safe_read(&session_c, sizeof(ui32), stdin);
+	ui32 qid = 1;
+	while (fread(&session_c, sizeof(ui32), 1, stdin) == 1) {
 		printf("qid: %u\n", qid);
 		printf("session_c: %u\n", session_c);
 		for (ui32 i = 0; i < session_c; ++i) {
@@ -29,5 +28,6 @@ void read_sparse_click_log() {
 				printf("\t\turl: %u\n", url);
 			}
 		}
+		++qid;
 	}
 }
